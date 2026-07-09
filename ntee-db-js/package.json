@@ -1,0 +1,30 @@
+{
+  "name": "@ntee/ntee-db",
+  "version": "0.4.1",
+  "description": "Node.js binding for nteedb — a pure-Go embedded log-structured KV store with secondary indexes",
+  "type": "module",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "prebuilds",
+    "!prebuilds/**/*.h"
+  ],
+  "scripts": {
+    "build:native": "bash ../capi/build.sh",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "koffi": "^2.9.0"
+  },
+  "devDependencies": {
+    "better-sqlite3": "^12.11.1",
+    "lmdb": "^3.5.6"
+  }
+}
