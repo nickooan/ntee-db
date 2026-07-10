@@ -114,19 +114,21 @@ Values of `number`-kind indexes are parsed from the token (`ix status 200`).
 
 ### Writes (serialized)
 
+| Command | Core call | Result |
+| --- | --- | --- |
+| `put <pk> <nbytes>` + value block | Put | `true` — length-prefixed: exactly `nbytes` raw bytes follow, then a newline |
+| `put <pk> <inline value…rest of line>` | Put | `true` — sugar for single-line values |
+| `putx <pk> <ixbytes> <nbytes>` + 2 blocks | PutIndexed | `true` — index-values JSON block, then value block |
+| `del <pk>` | Delete | `true` |
+| `rml <cutoff>` | RemoveByPkLess | count of deleted keys (`< cutoff`) |
+| `rmg <cutoff>` | RemoveByPkGreater | count of deleted keys (`> cutoff`) |
+
+A full `putx` frame on the wire:
+
 ```
-put <pk> <nbytes>\r\n
-<value: exactly nbytes raw bytes>\r\n
-
-put <pk> <inline value…to end of line>
-
-putx <pk> <ixbytes> <nbytes>\r\n
-<index values JSON, e.g. {"traceId":"T1","status":200}>\r\n
-<value bytes>\r\n
-
-del <pk>
-rml <cutoff>        delete every key < cutoff   → count
-rmg <cutoff>        delete every key > cutoff   → count
+putx call:1 29 18\r\n
+{"traceId":"T1","status":200}\r\n
+{"kind":"request"}\r\n
 ```
 
 The **length-prefixed** `put` form carries any bytes (raw binary, multi-line
