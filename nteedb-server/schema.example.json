@@ -3,6 +3,7 @@
   "blobThreshold": 65536,
   "syncEveryWrite": false,
   "hintEveryN": 1000,
+  "autoCompact": true,
   "indexes": [
     { "name": "traceId", "kind": "string" },
     { "name": "kind", "kind": "string", "jsonPath": "kind" },

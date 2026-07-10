@@ -78,6 +78,13 @@ type DB struct {
 	blobPath string
 	metaPath string
 
+	// wmu is the writer gate: every mutation (Put/PutIndexed/PutBatch/Delete/
+	// range-delete/Compact/Reindex/Close) holds it for its full duration,
+	// acquired strictly BEFORE mu. It exists so Compact/Reindex can exclude
+	// writers during their long O(table) rebuild while taking mu exclusively
+	// only for the brief final swap — readers (mu.RLock) stay live throughout
+	// the rebuild. Readers never touch wmu.
+	wmu    sync.Mutex
 	mu     sync.RWMutex
 	lock   *os.File   // exclusive flock handle enforcing a single writer process
 	main   *mainLog   // append writer for main.jsonl (the main table)
@@ -396,6 +403,8 @@ func (db *DB) writeHintAsync(snap hintSnapshot) {
 // Put stores value under key. Any secondary indexes with an Extract function
 // derive their value from the record automatically.
 func (db *DB) Put(key string, value []byte) error {
+	db.wmu.Lock()
+	defer db.wmu.Unlock()
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	if db.closed {
@@ -409,6 +418,8 @@ func (db *DB) Put(key string, value []byte) error {
 // index Extract function. An unknown index name or a value of the wrong kind is
 // an error and nothing is written.
 func (db *DB) PutIndexed(key string, value []byte, idx IndexValues) error {
+	db.wmu.Lock()
+	defer db.wmu.Unlock()
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	if db.closed {
@@ -419,12 +430,10 @@ func (db *DB) PutIndexed(key string, value []byte, idx IndexValues) error {
 
 // Get returns the value stored under key. ok is false if the key is absent.
 //
-// Note: this holds db.mu.RLock across the pread, and Compact holds the exclusive
-// Lock for its whole duration — so a read that arrives during a Compact stalls
-// until it finishes. Fine when Compact is occasional (its whole point is to run
-// rarely); a compaction-heavy workload would want online compaction (do the
-// expensive buildRewrite off the exclusive lock via a COW index clone, take the
-// lock only to replay the tail and swap). See BenchmarkGetContention.
+// Reads stay live during Compact/Reindex: their long rebuild phase holds only
+// the writer gate (wmu), and mu is taken exclusively just for the final file
+// swap — so a read overlapping a compaction stalls only for that brief swap.
+// See BenchmarkGetContention and TestReadsProceedDuringCompactRewrite.
 func (db *DB) Get(key string) (value []byte, ok bool, err error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -519,6 +528,25 @@ func (db *DB) Stats() Stats {
 	return s
 }
 
+// LiveBytes returns the total size of the live record lines in main.jsonl —
+// the size Compact would shrink the log to (blob contents not included).
+// Together with Stats().MainBytes it yields the dead-space ratio that
+// auto-compaction policies need: dead = MainBytes - LiveBytes. O(records):
+// walks the in-memory index; no I/O.
+func (db *DB) LiveBytes() int64 {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed {
+		return 0
+	}
+	var n int64
+	db.pk.scan(func(e pkEntry) bool {
+		n += int64(e.n)
+		return true
+	})
+	return n
+}
+
 // Has reports whether key is present without reading its value.
 func (db *DB) Has(key string) bool {
 	db.mu.RLock()
@@ -532,6 +560,8 @@ func (db *DB) Has(key string) bool {
 
 // Delete removes key. Deleting an absent key is a no-op.
 func (db *DB) Delete(key string) error {
+	db.wmu.Lock()
+	defer db.wmu.Unlock()
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	if db.closed {
@@ -579,6 +609,8 @@ func (db *DB) readRecord(e pkEntry) (record, error) {
 // Close flushes pending state and releases resources. The DB must not be used
 // afterward.
 func (db *DB) Close() error {
+	db.wmu.Lock()
+	defer db.wmu.Unlock()
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	if db.closed {

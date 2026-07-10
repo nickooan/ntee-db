@@ -417,6 +417,58 @@ func TestPipelining(t *testing.T) {
 	}
 }
 
+func TestAutoCompact(t *testing.T) {
+	schema := testSchema(t)
+	schema.AutoCompact = true
+	srv := startServer(t, schema, authNone(), Config{
+		AutoCompact:     true,
+		CompactInterval: 20 * time.Millisecond,
+		CompactMinBytes: 1,
+		CompactRatio:    0.5,
+	})
+	tc := dial(t, srv)
+
+	// 40 records, then delete 30: the survivors' lines are a small fraction of
+	// a log that also holds 30 dead records and 30 tombstones — well past the
+	// 0.5 trigger.
+	for i := 0; i < 40; i++ {
+		tc.mustOK(fmt.Sprintf(`put k:%02d {"n":%d}`, i, i))
+	}
+	for i := 10; i < 40; i++ {
+		tc.mustOK(fmt.Sprintf("del k:%02d", i))
+	}
+	before := tc.mustOK("stats").(map[string]any)
+	if before["mainBytes"].(float64) <= before["liveBytes"].(float64) {
+		t.Fatalf("expected dead space before compaction: %v", before)
+	}
+
+	// Wait for the controller to fire and reclaim the log.
+	deadline := time.Now().Add(3 * time.Second)
+	var after map[string]any
+	for {
+		after = tc.mustOK("stats").(map[string]any)
+		if after["autoCompacts"].(float64) >= 1 && after["mainBytes"] == after["liveBytes"] {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("auto-compact did not run: %v", after)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if after["mainBytes"].(float64) >= before["mainBytes"].(float64) {
+		t.Fatalf("log did not shrink: before %v after %v", before["mainBytes"], after["mainBytes"])
+	}
+
+	// Store contents intact after compaction.
+	if got := keys(tc.mustOK("scan k:")); len(got) != 10 {
+		t.Fatalf("survivors after compact: %v", got)
+	}
+	m := tc.cmd("get k:05")
+	if m["found"] != true || m["result"].(map[string]any)["n"] != float64(5) {
+		t.Fatalf("read after compact: %v", m)
+	}
+}
+
 func TestProtectedMode(t *testing.T) {
 	none, pw := authNone(), authPassword("x")
 	for _, tc := range []struct {

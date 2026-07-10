@@ -87,12 +87,16 @@ func run(o cliOptions) error {
 	}
 	defer db.Close() // writes the index hint → next boot is fast
 
-	srv := NewServer(Config{Addr: o.addr, IdleTimeout: o.idle}, db, auth, schema)
+	srv := NewServer(Config{Addr: o.addr, IdleTimeout: o.idle, AutoCompact: schema.AutoCompact}, db, auth, schema)
 	if err := srv.Listen(); err != nil {
 		return err
 	}
-	log.Printf("listening on %s (store %s, auth %s, %d indexes)",
-		srv.Addr(), schema.Dir, auth.mode, len(schema.Indexes))
+	autoCompact := "off"
+	if schema.AutoCompact {
+		autoCompact = "on"
+	}
+	log.Printf("listening on %s (store %s, auth %s, %d indexes, auto-compact %s)",
+		srv.Addr(), schema.Dir, auth.mode, len(schema.Indexes), autoCompact)
 
 	// Graceful shutdown: stop accepting, close connections, then (deferred)
 	// db.Close.

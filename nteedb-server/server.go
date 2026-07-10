@@ -22,6 +22,16 @@ type Config struct {
 	MaxLine     int           // command line limit (inline puts included)
 	MaxValue    int           // length-prefixed data block limit
 	Quiet       bool          // silence per-connection logs (tests)
+
+	// Auto-compaction (enabled via schema.json's "autoCompact"): every
+	// CompactInterval the server computes the main log's dead-space ratio,
+	// 1 - LiveBytes/MainBytes, and runs Compact when it reaches CompactRatio
+	// (and the log is at least CompactMinBytes — compacting tiny logs is
+	// pointless churn). Reads stay live during the compaction; writes pend.
+	AutoCompact     bool
+	CompactRatio    float64       // trigger threshold (default 0.5)
+	CompactMinBytes int64         // minimum log size to consider (default 1 MiB)
+	CompactInterval time.Duration // check cadence (default 30s)
 }
 
 type Server struct {
@@ -36,10 +46,12 @@ type Server struct {
 	conns  map[net.Conn]struct{}
 	wg     sync.WaitGroup
 	closed atomic.Bool
+	stop   chan struct{} // closed by Close; ends the auto-compact loop
 
 	// counters surfaced by the stats command
-	totalConns atomic.Int64
-	commands   atomic.Int64
+	totalConns   atomic.Int64
+	commands     atomic.Int64
+	autoCompacts atomic.Int64
 }
 
 func NewServer(cfg Config, db *nteedb.DB, auth *authStore, schema *Schema) *Server {
@@ -49,6 +61,15 @@ func NewServer(cfg Config, db *nteedb.DB, auth *authStore, schema *Schema) *Serv
 	if cfg.MaxValue <= 0 {
 		cfg.MaxValue = 32 << 20 // 32 MiB
 	}
+	if cfg.CompactRatio <= 0 {
+		cfg.CompactRatio = 0.5
+	}
+	if cfg.CompactMinBytes <= 0 {
+		cfg.CompactMinBytes = 1 << 20 // 1 MiB
+	}
+	if cfg.CompactInterval <= 0 {
+		cfg.CompactInterval = 30 * time.Second
+	}
 	return &Server{
 		cfg:    cfg,
 		db:     db,
@@ -56,6 +77,7 @@ func NewServer(cfg Config, db *nteedb.DB, auth *authStore, schema *Schema) *Serv
 		schema: schema,
 		kinds:  schema.Kinds(),
 		conns:  make(map[net.Conn]struct{}),
+		stop:   make(chan struct{}),
 	}
 }
 
@@ -75,6 +97,10 @@ func (s *Server) Addr() string { return s.ln.Addr().String() }
 // Serve accepts connections until Close. Each connection gets its own
 // goroutine; reads run in parallel via the core's RWMutex, writes serialize.
 func (s *Server) Serve() error {
+	if s.cfg.AutoCompact {
+		s.wg.Add(1)
+		go s.autoCompactLoop()
+	}
 	for {
 		c, err := s.ln.Accept()
 		if err != nil {
@@ -101,6 +127,7 @@ func (s *Server) Close() {
 	if !s.closed.CompareAndSwap(false, true) {
 		return
 	}
+	close(s.stop)
 	if s.ln != nil {
 		s.ln.Close()
 	}
@@ -110,6 +137,49 @@ func (s *Server) Close() {
 	}
 	s.mu.Unlock()
 	s.wg.Wait()
+}
+
+// autoCompactLoop periodically checks the log's dead-space ratio and compacts
+// when it crosses the threshold. Compaction keeps reads live (the core holds
+// only its writer gate during the rebuild); writes pend until it finishes.
+func (s *Server) autoCompactLoop() {
+	defer s.wg.Done()
+	t := time.NewTicker(s.cfg.CompactInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-t.C:
+			s.maybeCompact()
+		}
+	}
+}
+
+func (s *Server) maybeCompact() {
+	st := s.db.Stats()
+	if st.MainBytes < s.cfg.CompactMinBytes {
+		return
+	}
+	dead := st.MainBytes - s.db.LiveBytes()
+	ratio := float64(dead) / float64(st.MainBytes)
+	if ratio < s.cfg.CompactRatio {
+		return
+	}
+	if !s.cfg.Quiet {
+		log.Printf("auto-compact: %.0f%% dead (%d of %d bytes), compacting", ratio*100, dead, st.MainBytes)
+	}
+	start := time.Now()
+	if err := s.db.Compact(); err != nil {
+		if !s.closed.Load() && !s.cfg.Quiet {
+			log.Printf("auto-compact failed: %v", err)
+		}
+		return
+	}
+	s.autoCompacts.Add(1)
+	if !s.cfg.Quiet {
+		log.Printf("auto-compact: %d → %d bytes in %s", st.MainBytes, s.db.Stats().MainBytes, time.Since(start).Round(time.Millisecond))
+	}
 }
 
 // connState is one client connection's session: auth status and granted role.

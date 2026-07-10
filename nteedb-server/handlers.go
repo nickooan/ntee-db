@@ -257,12 +257,14 @@ func (s *Server) dispatch(rw respWriter, r *bufio.Reader, line []byte, st *connS
 		open := len(s.conns)
 		s.mu.Unlock()
 		return false, rw.ok(map[string]any{
-			"records":     st.Records,
-			"mainBytes":   st.MainBytes,
-			"blobBytes":   st.BlobBytes,
-			"connections": open,
-			"totalConns":  s.totalConns.Load(),
-			"commands":    s.commands.Load(),
+			"records":      st.Records,
+			"mainBytes":    st.MainBytes,
+			"liveBytes":    s.db.LiveBytes(),
+			"blobBytes":    st.BlobBytes,
+			"connections":  open,
+			"totalConns":   s.totalConns.Load(),
+			"commands":     s.commands.Load(),
+			"autoCompacts": s.autoCompacts.Load(),
 		})
 
 	case "dropped":

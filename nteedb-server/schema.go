@@ -18,6 +18,11 @@ type Schema struct {
 	SyncEveryWrite bool          `json:"syncEveryWrite"`
 	HintEveryN     int           `json:"hintEveryN"`
 	Indexes        []SchemaIndex `json:"indexes"`
+
+	// AutoCompact enables the server's background compaction: when the main
+	// log's dead-space ratio crosses a threshold, the server runs Compact on
+	// its own (reads stay live; writes pend for the compaction's duration).
+	AutoCompact bool `json:"autoCompact"`
 }
 
 type SchemaIndex struct {

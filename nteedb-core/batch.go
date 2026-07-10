@@ -21,6 +21,8 @@ type PutItem struct {
 // as issuing sequential Puts. When PutBatch returns nil, every record has been
 // appended (and fsynced, in durable mode).
 func (db *DB) PutBatch(items []PutItem) error {
+	db.wmu.Lock()
+	defer db.wmu.Unlock()
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	if db.closed {

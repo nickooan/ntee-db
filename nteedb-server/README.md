@@ -47,6 +47,7 @@ Same shape as the JS binding's open options:
   "blobThreshold": 65536,
   "syncEveryWrite": false,
   "hintEveryN": 1000,
+  "autoCompact": true,
   "indexes": [
     { "name": "traceId", "kind": "string" },
     { "name": "kind", "kind": "string", "jsonPath": "kind" },
@@ -57,6 +58,23 @@ Same shape as the JS binding's open options:
 
 `jsonPath` (dotted path into the record) derives the index value on every
 write; indexes without it take explicit values via `putx`.
+
+### Auto-compaction
+
+The log is append-only: overwrites, deletes, and range-deletes leave dead
+lines behind until a compaction rewrites the file. Embedded users compact on
+close; a daemon never closes — so with `"autoCompact": true` the server does
+it itself. Every 30 s it computes the **dead-space ratio**
+(`1 − liveBytes/mainBytes`, both visible in `stats`) and runs a compaction
+when the ratio reaches **50%** and the log is at least **1 MiB** (compacting a
+tiny log is pointless churn).
+
+While a compaction runs, **reads keep working** — the core rebuilds the log
+holding only its writer gate and takes the exclusive lock just for the final
+atomic file swap. Writes issued during the rebuild simply wait and apply once
+it finishes. Each run is logged (`auto-compact: 2114970 → 361226 bytes in
+87ms`) and counted in `stats.autoCompacts`. A manual `compact` (admin) is
+still available regardless of the flag.
 
 ### Auth
 
@@ -149,7 +167,7 @@ response. Anything else (binary, non-JSON text) comes back wrapped:
 | `auth <password>` / `auth <user> <password>` | per connection, first |
 | `hello` | server name, version, auth mode, declared indexes |
 | `ping`, `quit` | |
-| `stats` | core stats + `connections`, `totalConns`, `commands` |
+| `stats` | core stats + `liveBytes`, `connections`, `totalConns`, `commands`, `autoCompacts` |
 | `dropped`, `prospective` | index lifecycle introspection |
 | `compact`, `reindex` | **admin role** — they hold the write lock while running |
 
@@ -163,6 +181,7 @@ index hint is written, so the next boot is fast).
 
 ## Future work
 
-`mput` (batch put in one round-trip), raw-framed `getr` for binary-heavy
-workloads, TLS, per-user ACLs, unix-domain socket listener, metrics endpoint,
-and a Go client package.
+Raw-framed `getr` for binary-heavy workloads, TLS, per-user ACLs, unix-domain
+socket listener, metrics endpoint, and a Go client package. (A batch `mput`
+was considered and dropped: pipelining already amortizes round-trips, and the
+one-fsync-per-batch benefit only matters under `syncEveryWrite`.)

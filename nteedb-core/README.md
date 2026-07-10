@@ -55,7 +55,11 @@ import nteedb "github.com/nickooan/ntee-db/nteedb-core"
   `covers` watermark; a missing/corrupt hint safely falls back to a full scan.
   A torn final line from a crash mid-append is detected and truncated.
 - **Compaction** rewrites the main log with only live records (dropping
-  superseded versions and tombstones) via a single atomic rename.
+  superseded versions and tombstones) via a single atomic rename. **Reads stay
+  live during the rewrite**: Compact/Reindex hold only an internal writer gate
+  for the long rebuild (writes pend until it finishes) and take the exclusive
+  lock just for the final swap. `LiveBytes()` vs `Stats().MainBytes` gives the
+  dead-space ratio for deciding when to compact.
 - **Single writer per store.** `Open` takes an exclusive, non-blocking kernel
   lock (`flock`) on `<dir>/LOCK`; a second process gets `ErrLocked` and can
   degrade gracefully (e.g. run without its cache). The lock is tied to the
