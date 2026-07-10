@@ -4,20 +4,18 @@ package nteedb
 // each declared index's Extract function — back-filling indexes that were added
 // (or whose kind changed) after records already existed. It also reclaims dead
 // space and drops ix fields of undeclared indexes. Reads stay live during the
-// O(table) rebuild (writes pend on the writer gate; mu is exclusive only for
-// the final swap); it reads every record's value (including blobs), so it is a
-// deliberate, occasional operation.
+// O(table) rebuild (writes pend on the compaction gate; mu is exclusive only
+// for the final swap); it reads every record's value (including blobs), so it
+// is a deliberate, occasional operation.
 //
 // Only Extract-based indexes can be back-filled. Explicit-value indexes (no
 // Extract) cannot — their historical values were never recorded anywhere — and
 // remain prospective afterward.
 func (db *DB) Reindex() error {
-	db.wmu.Lock()
-	defer db.wmu.Unlock()
 	if err := db.rewriteGated(db.reindexTransform); err != nil {
 		return err
 	}
-	db.mu.Lock()
+	db.lockWrite()
 	defer db.mu.Unlock()
 	return db.markReindexedLocked()
 }

@@ -39,9 +39,9 @@ func (db *DB) failStopLocked(cause error) error {
 // live record line — including inline values — is read and rewritten (only
 // blob CONTENTS are spared; their refs are copied verbatim).
 //
-// Reads stay live throughout the rebuild: Compact holds only the writer gate
-// (writes pend until it finishes) and takes the exclusive lock just for the
-// brief final swap. See TestReadsProceedDuringCompactRewrite.
+// Reads stay live throughout the rebuild: Compact raises the compaction gate
+// (writes pend until it finishes — see lockWrite) and takes the exclusive
+// lock just for the brief final swap. See TestReadsProceedDuringCompactRewrite.
 //
 // Only the main log is rewritten; blob references are preserved and blobs.dat is
 // left untouched, keeping the swap a single atomic rename (crash-safe). The
@@ -49,8 +49,6 @@ func (db *DB) failStopLocked(cause error) error {
 // is lost before the rename metadata is durable, the old main.jsonl simply
 // remains and the leftover .compact file is ignored on the next open.
 func (db *DB) Compact() error {
-	db.wmu.Lock()
-	defer db.wmu.Unlock()
 	return db.rewriteGated(db.compactTransform)
 }
 
@@ -111,25 +109,36 @@ func (db *DB) filterIXKnown(ix map[string]any) map[string]any {
 
 // rewriteGated rewrites the main log keeping only live records, applying
 // transform to each, then atomically swaps the file in and rebuilds in-memory
-// state. Callers must hold db.wmu (the writer gate) — that alone makes the
-// long buildRewrite phase safe: writers are excluded, so db.pk / db.rf /
-// db.secIndexes are only read concurrently (by readers under mu.RLock, which
-// keep working). db.mu is taken exclusively only for the swap at the end.
-// (blobs.dat is unchanged, so db.blobs stays open as-is.)
+// state. It raises the compaction gate (db.compacting) for its duration: every
+// mutation waits in lockWrite, which alone makes the long buildRewrite phase
+// safe — db.pk / db.rf / db.secIndexes are only read concurrently (by readers
+// under mu.RLock, which keep working). db.mu is held exclusively only to flip
+// the gate and for the swap at the end. (blobs.dat is unchanged, so db.blobs
+// stays open as-is.)
 func (db *DB) rewriteGated(transform func(record) (record, error)) error {
-	// closed cannot flip while we hold wmu (Close takes it too), so one check
-	// up front suffices.
-	db.mu.RLock()
-	closed := db.closed
-	db.mu.RUnlock()
-	if closed {
+	// Raise the gate. lockWrite also waits out a concurrent Compact/Reindex,
+	// so at most one rebuild runs at a time. closed cannot flip while the gate
+	// is up (Close waits in lockWrite too), so one check suffices.
+	db.lockWrite()
+	if db.closed {
+		db.mu.Unlock()
 		return ErrClosed
 	}
+	db.compacting = true
+	db.mu.Unlock()
+	// Lower the gate on EVERY path — writers are parked until this runs. This
+	// deferred re-lock executes after the swap phase's deferred Unlock below.
+	defer func() {
+		db.mu.Lock()
+		db.compacting = false
+		db.writable.Broadcast()
+		db.mu.Unlock()
+	}()
 
 	newMain := db.mainPath + ".compact"
 	_ = os.Remove(newMain)
 
-	// Long phase — readers stay live.
+	// Long phase — readers stay live, writers wait on the gate.
 	newIdx, err := db.buildRewrite(newMain, transform)
 	if err != nil {
 		_ = os.Remove(newMain)

@@ -56,7 +56,7 @@ import nteedb "github.com/nickooan/ntee-db/nteedb-core"
   A torn final line from a crash mid-append is detected and truncated.
 - **Compaction** rewrites the main log with only live records (dropping
   superseded versions and tombstones) via a single atomic rename. **Reads stay
-  live during the rewrite**: Compact/Reindex hold only an internal writer gate
+  live during the rewrite**: Compact/Reindex raise only an internal compaction gate
   for the long rebuild (writes pend until it finishes) and take the exclusive
   lock just for the final swap. `LiveBytes()` vs `Stats().MainBytes` gives the
   dead-space ratio for deciding when to compact.

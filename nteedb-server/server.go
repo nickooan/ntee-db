@@ -141,7 +141,7 @@ func (s *Server) Close() {
 
 // autoCompactLoop periodically checks the log's dead-space ratio and compacts
 // when it crosses the threshold. Compaction keeps reads live (the core holds
-// only its writer gate during the rebuild); writes pend until it finishes.
+// only its compaction gate during the rebuild); writes pend until it finishes.
 func (s *Server) autoCompactLoop() {
 	defer s.wg.Done()
 	t := time.NewTicker(s.cfg.CompactInterval)

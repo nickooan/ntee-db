@@ -78,13 +78,6 @@ type DB struct {
 	blobPath string
 	metaPath string
 
-	// wmu is the writer gate: every mutation (Put/PutIndexed/PutBatch/Delete/
-	// range-delete/Compact/Reindex/Close) holds it for its full duration,
-	// acquired strictly BEFORE mu. It exists so Compact/Reindex can exclude
-	// writers during their long O(table) rebuild while taking mu exclusively
-	// only for the brief final swap — readers (mu.RLock) stay live throughout
-	// the rebuild. Readers never touch wmu.
-	wmu    sync.Mutex
 	mu     sync.RWMutex
 	lock   *os.File   // exclusive flock handle enforcing a single writer process
 	main   *mainLog   // append writer for main.jsonl (the main table)
@@ -93,6 +86,13 @@ type DB struct {
 	pk     *pkIndex   // in-memory primary-key index
 	writes int        // writes since the last hint rewrite
 	closed bool
+
+	// The compaction gate. While a Compact/Reindex rebuild is in flight,
+	// compacting is set and every mutation waits on writable (see lockWrite) —
+	// readers (mu.RLock) never look at the flag and stay live throughout; mu
+	// is held exclusively only for the rebuild's brief final swap.
+	compacting bool
+	writable   sync.Cond // Cond.L = &db.mu; broadcast when compacting clears
 
 	// Async periodic hint machinery. The periodic hint rewrite (every
 	// HintEveryN writes) runs in a background goroutine off the write path;
@@ -150,6 +150,7 @@ func Open(opts Options) (*DB, error) {
 		prospective: make(map[string]bool),
 		dropped:     make(map[string]ValueKind),
 	}
+	db.writable.L = &db.mu
 	for _, def := range opts.Indexes {
 		if def.Name == "" {
 			return nil, errors.New("nteedb: secondary index name is required")
@@ -400,12 +401,21 @@ func (db *DB) writeHintAsync(snap hintSnapshot) {
 	_ = writeIndexHint(snap.path, snap.pk, snap.covers)
 }
 
+// lockWrite acquires the exclusive lock for a mutation, waiting out any
+// in-flight Compact/Reindex rebuild (Wait releases mu while blocked, so
+// readers — and the rebuild itself — proceed meanwhile). Pairs with a plain
+// db.mu.Unlock().
+func (db *DB) lockWrite() {
+	db.mu.Lock()
+	for db.compacting {
+		db.writable.Wait()
+	}
+}
+
 // Put stores value under key. Any secondary indexes with an Extract function
 // derive their value from the record automatically.
 func (db *DB) Put(key string, value []byte) error {
-	db.wmu.Lock()
-	defer db.wmu.Unlock()
-	db.mu.Lock()
+	db.lockWrite()
 	defer db.mu.Unlock()
 	if db.closed {
 		return ErrClosed
@@ -418,9 +428,7 @@ func (db *DB) Put(key string, value []byte) error {
 // index Extract function. An unknown index name or a value of the wrong kind is
 // an error and nothing is written.
 func (db *DB) PutIndexed(key string, value []byte, idx IndexValues) error {
-	db.wmu.Lock()
-	defer db.wmu.Unlock()
-	db.mu.Lock()
+	db.lockWrite()
 	defer db.mu.Unlock()
 	if db.closed {
 		return ErrClosed
@@ -430,10 +438,11 @@ func (db *DB) PutIndexed(key string, value []byte, idx IndexValues) error {
 
 // Get returns the value stored under key. ok is false if the key is absent.
 //
-// Reads stay live during Compact/Reindex: their long rebuild phase holds only
-// the writer gate (wmu), and mu is taken exclusively just for the final file
-// swap — so a read overlapping a compaction stalls only for that brief swap.
-// See BenchmarkGetContention and TestReadsProceedDuringCompactRewrite.
+// Reads stay live during Compact/Reindex: their long rebuild phase only
+// raises the compaction gate (which pauses writers — see lockWrite), and mu
+// is taken exclusively just for the final file swap — so a read overlapping a
+// compaction stalls only for that brief swap. See BenchmarkGetContention and
+// TestReadsProceedDuringCompactRewrite.
 func (db *DB) Get(key string) (value []byte, ok bool, err error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -560,9 +569,7 @@ func (db *DB) Has(key string) bool {
 
 // Delete removes key. Deleting an absent key is a no-op.
 func (db *DB) Delete(key string) error {
-	db.wmu.Lock()
-	defer db.wmu.Unlock()
-	db.mu.Lock()
+	db.lockWrite()
 	defer db.mu.Unlock()
 	if db.closed {
 		return ErrClosed
@@ -609,9 +616,9 @@ func (db *DB) readRecord(e pkEntry) (record, error) {
 // Close flushes pending state and releases resources. The DB must not be used
 // afterward.
 func (db *DB) Close() error {
-	db.wmu.Lock()
-	defer db.wmu.Unlock()
-	db.mu.Lock()
+	// lockWrite waits out an in-flight compaction rebuild: Close must not
+	// tear down file handles the rebuild is still reading.
+	db.lockWrite()
 	defer db.mu.Unlock()
 	if db.closed {
 		return nil
