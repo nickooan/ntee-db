@@ -14,15 +14,15 @@ cache-shaped workload: 20,000 records, ~120-byte JSON values, time-ordered keys
 rounds (fresh store per round, warm-up discarded). Scripts in
 [`bench/`](bench/); **bold** marks the fastest engine per row.
 
-| Operation                            | ntee-db | lmdb            | better-sqlite3   |
-| ------------------------------------ | ------------- | --------------- | ---------------- |
-| `get`                                | 4.8 µs        | **1.1 µs**      | 1.5 µs           |
-| exists check                         | 1.3 µs        | **0.7 µs**      | 1.6 µs           |
-| put — fast path (caller-sync)        | **4.6 µs**    | 1.6 µs (async†) | 10.9 µs          |
-| put — fsync every write (power-loss) | ~3 ms         | ~3 ms           | ~3 ms            |
-| batch (one 20k commit)               | 4.7 µs        | —               | **2.5 µs** (txn) |
-| put — fast, `hintEveryN: 5`          | 16.2 µs       | —               | —                |
-| prefix scan, all 20k keys            | **2.2 ms**    | 3.9 ms          | 4.8 ms           |
+| Operation                            | ntee-db    | lmdb            | better-sqlite3   |
+| ------------------------------------ | ---------- | --------------- | ---------------- |
+| `get`                                | 4.8 µs     | **1.1 µs**      | 1.5 µs           |
+| exists check                         | 1.3 µs     | **0.7 µs**      | 1.6 µs           |
+| put — fast path (caller-sync)        | **4.6 µs** | 1.6 µs (async†) | 10.9 µs          |
+| put — fsync every write (power-loss) | ~3 ms      | ~3 ms           | ~3 ms            |
+| batch (one 20k commit)               | 4.7 µs     | —               | **2.5 µs** (txn) |
+| put — fast, `hintEveryN: 5`          | 16.2 µs    | —               | —                |
+| prefix scan, all 20k keys            | **2.2 ms** | 3.9 ms          | 4.8 ms           |
 
 † lmdb's fast path is **async/batched** — the write is not durable when the
 call returns, so it is not a caller-synchronous write like ntee-db's `put` or
@@ -45,14 +45,14 @@ endpoints. SQLite is a genuine peer here (it has real secondary indexes); lmdb
 has none, so its "latest per endpoint" is what the pre-ntee-db app code did —
 full scan + parse + dedup in JS.
 
-| Operation                           | ntee-db | lmdb                   | better-sqlite3      |
-| ----------------------------------- | ------------- | ---------------------- | ------------------- |
-| put carrying 2 index values         | **9.0 µs**    | 1.2 µs (no indexes\*)  | 25.2 µs             |
-| put, full app config\*\*            | 62 µs         | —                      | —                   |
-| search a value → keys (~20 matches) | 4.5 µs        | —§                     | **2.9 µs**          |
-| search a value → records (~20)      | ~93 µs        | —§                     | **11 µs**           |
-| latest call of one endpoint         | 3.4 µs        | —                      | **1.5 µs**          |
-| latest call of every endpoint (500) | **0.2 ms**    | 17.8 ms (scan + dedup) | 1.5 ms (`GROUP BY`) |
+| Operation                           | ntee-db    | lmdb                   | better-sqlite3      |
+| ----------------------------------- | ---------- | ---------------------- | ------------------- |
+| put carrying 2 index values         | **9.0 µs** | 1.2 µs (no indexes\*)  | 25.2 µs             |
+| put, full app config\*\*            | 62 µs      | —                      | —                   |
+| search a value → keys (~20 matches) | 4.5 µs     | —§                     | **2.9 µs**          |
+| search a value → records (~20)      | ~93 µs     | —§                     | **11 µs**           |
+| latest call of one endpoint         | 3.4 µs     | —                      | **1.5 µs**          |
+| latest call of every endpoint (500) | **0.2 ms** | 17.8 ms (scan + dedup) | 1.5 ms (`GROUP BY`) |
 
 \* not equivalent work: lmdb's put maintains no indexes — that cost lands on
 every query instead (the 17.8 ms row). ntee-db and SQLite both maintain the two
