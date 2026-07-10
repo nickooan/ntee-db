@@ -9,14 +9,15 @@ import { fileURLToPath } from "node:url"
 const here = path.dirname(fileURLToPath(import.meta.url))
 
 function libraryPath() {
-  const osName = process.platform === "win32" ? "windows" : process.platform // darwin | linux | windows
+  if (process.platform === "win32") {
+    throw new Error(
+      "nteedb: Windows is not supported yet (no prebuilt library ships for it; " +
+        "prebuilds cover darwin-arm64, linux-amd64, linux-arm64)",
+    )
+  }
+  const osName = process.platform // darwin | linux
   const goarch = process.arch === "x64" ? "amd64" : process.arch // x64→amd64, arm64→arm64
-  const ext =
-    process.platform === "darwin"
-      ? "dylib"
-      : process.platform === "win32"
-        ? "dll"
-        : "so"
+  const ext = process.platform === "darwin" ? "dylib" : "so"
   return path.join(
     here,
     "..",
@@ -35,8 +36,9 @@ const lib = (() => {
     throw new Error(
       `nteedb: no native library for ${process.platform}-${process.arch} at ${path} ` +
         `(prebuilds ship for darwin-arm64, linux-amd64, linux-arm64). ` +
-        `Build one for this host with: npm run build:native (requires Go). ` +
-        `Original error: ${cause.message}`,
+        `To build one for this host, clone https://github.com/nickooan/ntee-db ` +
+        `and run capi/build.sh (requires Go), then copy the library into this ` +
+        `package's prebuilds/ directory. Original error: ${cause.message}`,
       { cause },
     )
   }

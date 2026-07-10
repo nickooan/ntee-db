@@ -1,7 +1,40 @@
 {
   "name": "@ntee/ntee-db",
   "version": "0.4.1",
-  "description": "Node.js binding for nteedb — a pure-Go embedded log-structured KV store with secondary indexes",
+  "description": "Node.js binding for nteedb — a pure-Go embedded log-structured KV store with secondary indexes supported",
+  "license": "Apache-2.0",
+  "author": "nickooan <nickooan@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nickooan/ntee-db.git",
+    "directory": "ntee-db-js"
+  },
+  "homepage": "https://github.com/nickooan/ntee-db/tree/main/ntee-db-js#readme",
+  "bugs": {
+    "url": "https://github.com/nickooan/ntee-db/issues"
+  },
+  "keywords": [
+    "database",
+    "embedded",
+    "key-value",
+    "kv-store",
+    "secondary-index",
+    "log-structured",
+    "prefix-scan",
+    "storage",
+    "persistence",
+    "ffi",
+    "koffi",
+    "golang",
+    "prebuilt",
+    "json"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "src/index.js",
   "types": "src/index.d.ts",
