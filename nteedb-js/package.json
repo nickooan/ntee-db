@@ -9,7 +9,7 @@
     "url": "git+https://github.com/nickooan/ntee-db.git",
     "directory": "nteedb-js"
   },
-  "homepage": "http://github.com/nickooan/ntee-db/tree/main/nteedb-js#readme",
+  "homepage": "https://github.com/nickooan/ntee-db/tree/main/nteedb-js#readme",
   "bugs": {
     "url": "https://github.com/nickooan/ntee-db/issues"
   },
@@ -31,9 +31,6 @@
   ],
   "engines": {
     "node": ">=20"
-  },
-  "publishConfig": {
-    "access": "public"
   },
   "type": "module",
   "main": "src/index.js",

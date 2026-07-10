@@ -1,4 +1,4 @@
-# @ntee/ntee-db (Node.js binding)
+# ntee-db (Node.js binding)
 
 In-process Node.js binding for **nteedb** — a pure-Go embedded log-structured
 KV store with prefix search and secondary indexes. The Go core is exposed as a
@@ -14,7 +14,7 @@ cache-shaped workload: 20,000 records, ~120-byte JSON values, time-ordered keys
 rounds (fresh store per round, warm-up discarded). Scripts in
 [`bench/`](bench/); **bold** marks the fastest engine per row.
 
-| Operation                            | @ntee/ntee-db | lmdb            | better-sqlite3   |
+| Operation                            | ntee-db | lmdb            | better-sqlite3   |
 | ------------------------------------ | ------------- | --------------- | ---------------- |
 | `get`                                | 4.8 µs        | **1.1 µs**      | 1.5 µs           |
 | exists check                         | 1.3 µs        | **0.7 µs**      | 1.6 µs           |
@@ -45,7 +45,7 @@ endpoints. SQLite is a genuine peer here (it has real secondary indexes); lmdb
 has none, so its "latest per endpoint" is what the pre-ntee-db app code did —
 full scan + parse + dedup in JS.
 
-| Operation                           | @ntee/ntee-db | lmdb                   | better-sqlite3      |
+| Operation                           | ntee-db | lmdb                   | better-sqlite3      |
 | ----------------------------------- | ------------- | ---------------------- | ------------------- |
 | put carrying 2 index values         | **9.0 µs**    | 1.2 µs (no indexes\*)  | 25.2 µs             |
 | put, full app config\*\*            | 62 µs         | —                      | —                   |
@@ -137,7 +137,7 @@ node bench/batch.mjs     # putMany, ntee-db only
 ## Usage
 
 ```js
-import { NteeDB } from "@ntee/ntee-db"
+import { NteeDB } from "ntee-db"
 
 const db = NteeDB.open("/path/to/store", {
   blobThreshold: 64 * 1024, // values >= this go to the blob side file
@@ -258,15 +258,20 @@ if (Buffer.isBuffer(v)) {
 
 ## Building the native lib
 
-Prebuilt binaries live in `prebuilds/<os>-<arch>/`. To (re)build for the host:
+The Go source for the c-shared library lives in [`capi/`](capi/) (it imports
+the core from the repo's `nteedb-core/` package). Prebuilt binaries live in
+`prebuilds/<os>-<arch>/`. To (re)build all three targets from macOS:
 
 ```sh
 npm run build:native      # runs capi/build.sh → prebuilds/<os>-<arch>/
 npm test
 ```
 
-Cross-OS binaries are produced by building **on each OS** (CI matrix); there is
-no cross-compile step (the Go + cgo source is identical per platform). Linux
-binaries can also be built from macOS with Docker via the repo's
-`npm run build:db-linux` (platform-pinned containers; on Apple Silicon,
-linux/amd64 runs under emulation).
+The script builds darwin on the host (requires Go) and both Linux arches in
+the official `golang` Docker image via `--platform` (on Apple Silicon,
+linux/amd64 runs under emulation). Individual targets:
+
+```sh
+capi/build.sh macos              # host build only
+capi/build.sh linux-arm64        # one Linux arch (Docker)
+```
