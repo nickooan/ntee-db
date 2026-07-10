@@ -1,5 +1,5 @@
 {
-  "name": "@ntee/ntee-db",
+  "name": "ntee-db",
   "version": "0.0.1",
   "description": "Node.js binding for nteedb — a pure-Go embedded log-structured KV store with secondary indexes supported",
   "license": "Apache-2.0",
