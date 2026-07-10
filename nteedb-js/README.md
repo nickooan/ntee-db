@@ -261,7 +261,7 @@ if (Buffer.isBuffer(v)) {
 Prebuilt binaries live in `prebuilds/<os>-<arch>/`. To (re)build for the host:
 
 ```sh
-npm run build:native      # runs ../capi/build.sh → prebuilds/<os>-<arch>/
+npm run build:native      # runs capi/build.sh → prebuilds/<os>-<arch>/
 npm test
 ```
 

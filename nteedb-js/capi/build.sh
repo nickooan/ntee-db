@@ -11,9 +11,9 @@
 # non-native arch runs under Rosetta/QEMU emulation.
 set -euo pipefail
 
-cd "$(dirname "$0")"                 # ntee-db/capi
-REPO_ROOT="$(cd .. && pwd)"
-OUT_ROOT="../ntee-db-js/prebuilds"
+cd "$(dirname "$0")"                 # ntee-db/nteedb-js/capi
+REPO_ROOT="$(cd ../.. && pwd)"
+OUT_ROOT="../prebuilds"
 GO_IMAGE="${GO_IMAGE:-golang:1.25-bookworm}"
 
 # -s -w strips the symbol table and DWARF debug info (~30-40% smaller); the
@@ -43,12 +43,12 @@ build_linux() {
     --platform "linux/${arch}" \
     --user "$(id -u):$(id -g)" \
     -v "$REPO_ROOT":/src \
-    -w /src/capi \
+    -w /src/nteedb-js/capi \
     -e CGO_ENABLED=1 \
     -e GOCACHE=/tmp/gocache \
     -e GOMODCACHE=/tmp/gomodcache \
     "$GO_IMAGE" \
-    go build "${GO_BUILD_FLAGS[@]}" -o "../ntee-db-js/prebuilds/linux-${arch}/libnteedb.so" .
+    go build "${GO_BUILD_FLAGS[@]}" -o "../prebuilds/linux-${arch}/libnteedb.so" .
   echo "→ $dir/libnteedb.so"
 }
 

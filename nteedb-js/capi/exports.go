@@ -22,7 +22,7 @@ import (
 	"errors"
 	"unsafe"
 
-	nteedb "codeberg.org/nickoan/ntee-r1quest/ntee-db"
+	nteedb "codeberg.org/nickoan/ntee-r1quest/ntee-db/nteedb-core"
 )
 
 func main() {}

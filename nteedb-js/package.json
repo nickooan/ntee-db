@@ -7,9 +7,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nickooan/ntee-db.git",
-    "directory": "ntee-db-js"
+    "directory": "nteedb-js"
   },
-  "homepage": "https://github.com/nickooan/ntee-db/tree/main/ntee-db-js#readme",
+  "homepage": "https://github.com/nickooan/ntee-db/tree/main/nteedb-js#readme",
   "bugs": {
     "url": "https://github.com/nickooan/ntee-db/issues"
   },
@@ -50,7 +50,7 @@
     "!prebuilds/**/*.h"
   ],
   "scripts": {
-    "build:native": "bash ../capi/build.sh",
+    "build:native": "bash capi/build.sh",
     "test": "node --test"
   },
   "dependencies": {
