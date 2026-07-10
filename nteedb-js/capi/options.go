@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	nteedb "codeberg.org/nickoan/ntee-r1quest/ntee-db"
+	nteedb "github.com/nickooan/ntee-db/nteedb-core"
 )
 
 // jsonOptions mirrors nteedb.Options for the JSON passed across the FFI boundary,

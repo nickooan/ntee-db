@@ -37,8 +37,8 @@ const lib = (() => {
       `nteedb: no native library for ${process.platform}-${process.arch} at ${path} ` +
         `(prebuilds ship for darwin-arm64, linux-amd64, linux-arm64). ` +
         `To build one for this host, clone https://github.com/nickooan/ntee-db ` +
-        `and run capi/build.sh (requires Go), then copy the library into this ` +
-        `package's prebuilds/ directory. Original error: ${cause.message}`,
+        `and run nteedb-js/capi/build.sh (requires Go), then copy the library ` +
+        `into this package's prebuilds/ directory. Original error: ${cause.message}`,
       { cause },
     )
   }

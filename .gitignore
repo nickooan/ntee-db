@@ -6,11 +6,12 @@
 coverage.txt
 
 # Stray binary from building the c-shared command directly (e.g. `go build` in
-# capi/). The real library is emitted into ntee-db-js/prebuilds by capi/build.sh,
-# and those prebuilds are committed on purpose — do not ignore *.so / *.dylib.
-/capi/capi
+# nteedb-js/capi/). The real library is emitted into nteedb-js/prebuilds by
+# nteedb-js/capi/build.sh, and those prebuilds are committed on purpose — do not
+# ignore *.so / *.dylib.
+/nteedb-js/capi/capi
 
-# Node (ntee-db-js/ also has its own scoped .gitignore)
+# Node (nteedb-js/ also has its own scoped .gitignore)
 node_modules/
 *.tgz
 
@@ -21,12 +22,12 @@ node_modules/
 # macOS Finder metadata
 .DS_Store
 
-# Benchmark scratch stores — ntee-db-js/bench/*.mjs create these with paths
+# Benchmark scratch stores — nteedb-js/bench/*.mjs create these with paths
 # relative to the cwd, so they can land at the repo root when a bench is run from
-# here (inside ntee-db-js/ they are also covered by that package's .gitignore).
-# `!ntee-db-js/` keeps the tracked package directory from being ignored.
+# here (inside nteedb-js/ they are also covered by that package's .gitignore).
+# nteedb-js/ and nteedb-core/ have no hyphen after "ntee", so `ntee-*/` does not
+# match the tracked directories.
 ntee-*/
-!ntee-db-js/
 lmdb-*/
 sqlite-*/
 *.sqlite

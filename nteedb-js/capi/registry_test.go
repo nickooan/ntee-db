@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	nteedb "codeberg.org/nickoan/ntee-r1quest/ntee-db"
+	nteedb "github.com/nickooan/ntee-db/nteedb-core"
 )
 
 // TestRegistryConcurrent hammers regPut/regGet/regDelete from many goroutines so

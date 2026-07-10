@@ -4,7 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	nteedb "codeberg.org/nickoan/ntee-r1quest/ntee-db"
+	nteedb "github.com/nickooan/ntee-db/nteedb-core"
 )
 
 // The handle registry maps opaque uint32 handles (held by the caller across the

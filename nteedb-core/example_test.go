@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	nteedb "codeberg.org/nickoan/ntee-r1quest/ntee-db"
+	nteedb "github.com/nickooan/ntee-db/nteedb-core"
 )
 
 func Example() {
