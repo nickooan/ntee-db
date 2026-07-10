@@ -22,6 +22,8 @@ type Schema struct {
 	// AutoCompact enables the server's background compaction: when the main
 	// log's dead-space ratio crosses a threshold, the server runs Compact on
 	// its own (reads stay live; writes pend for the compaction's duration).
+	// Default false (omitted field): compaction happens only via the manual
+	// admin `compact` command.
 	AutoCompact bool `json:"autoCompact"`
 }
 

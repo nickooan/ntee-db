@@ -14,7 +14,7 @@ import (
 	nteedb "github.com/nickooan/ntee-db/nteedb-core"
 )
 
-const serverVersion = "0.0.1"
+const serverVersion = "0.1.0"
 
 type Config struct {
 	Addr        string

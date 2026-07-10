@@ -47,7 +47,7 @@ Same shape as the JS binding's open options:
   "blobThreshold": 65536,
   "syncEveryWrite": false,
   "hintEveryN": 1000,
-  "autoCompact": true,
+  "autoCompact": false,
   "indexes": [
     { "name": "traceId", "kind": "string" },
     { "name": "kind", "kind": "string", "jsonPath": "kind" },
@@ -64,7 +64,10 @@ write; indexes without it take explicit values via `putx`.
 The log is append-only: overwrites, deletes, and range-deletes leave dead
 lines behind until a compaction rewrites the file. Embedded users compact on
 close; a daemon never closes — so with `"autoCompact": true` the server does
-it itself. Every 30 s it computes the **dead-space ratio**
+it itself. **Off by default** (an omitted field is `false`): without it,
+compaction happens only via the manual admin `compact` command — the same
+stance as the JS binding, which exposes `compact()` and leaves the policy to
+the caller. When enabled, every 30 s the server computes the **dead-space ratio**
 (`1 − liveBytes/mainBytes`, both visible in `stats`) and runs a compaction
 when the ratio reaches **50%** and the log is at least **1 MiB** (compacting a
 tiny log is pointless churn).
