@@ -321,12 +321,20 @@ func TestAuthPasswordFlow(t *testing.T) {
 	tc := dial(t, srv)
 
 	tc.mustFail("get k", "auth required")
-	if r := tc.mustOK("ping"); r != "pong" { // ping allowed pre-auth
-		t.Errorf("ping pre-auth: %v", r)
+	tc.mustFail("ping", "auth required") // like redis: ping is NOT pre-auth
+	// hello works pre-auth (the login handshake) but hides the schema.
+	if h := tc.mustOK("hello").(map[string]any); h["auth"] != "password" || h["indexes"] != nil {
+		t.Errorf("pre-auth hello must show auth mode and hide indexes: %v", h)
 	}
 	tc.mustFail("auth wrong", "invalid password")
 	tc.mustFail("get k", "auth required") // still unauthenticated
 	tc.mustOK("auth hunter2")
+	if r := tc.mustOK("ping"); r != "pong" {
+		t.Errorf("ping after auth: %v", r)
+	}
+	if h := tc.mustOK("hello").(map[string]any); h["indexes"] == nil {
+		t.Errorf("post-auth hello must include indexes: %v", h)
+	}
 	m := tc.cmd("get k")
 	if m["ok"] != true {
 		t.Errorf("get after auth: %v", m)

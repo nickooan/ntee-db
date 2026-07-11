@@ -18,24 +18,27 @@ func (s *Server) dispatch(rw respWriter, r *bufio.Reader, line []byte, st *connS
 	cmd, args := splitCommand(line)
 
 	switch cmd {
-	// ---- session (no auth needed) ----
+	// ---- session (no auth needed; same pre-auth allowlist as redis: AUTH,
+	// HELLO, QUIT — notably ping is NOT on it) ----
 	case "quit":
 		return true, rw.ok(true)
 
-	case "ping":
-		return false, rw.ok("pong")
-
 	case "hello":
-		ixs := make([]map[string]string, 0, len(s.schema.Indexes))
-		for _, ix := range s.schema.Indexes {
-			ixs = append(ixs, map[string]string{"name": ix.Name, "kind": ix.Kind})
-		}
-		return false, rw.ok(map[string]any{
+		// The handshake works pre-auth so a client can discover how to log
+		// in, but the store's schema is only revealed once authenticated.
+		result := map[string]any{
 			"server":  "nteedb",
 			"version": serverVersion,
 			"auth":    s.auth.mode,
-			"indexes": ixs,
-		})
+		}
+		if st.authed {
+			ixs := make([]map[string]string, 0, len(s.schema.Indexes))
+			for _, ix := range s.schema.Indexes {
+				ixs = append(ixs, map[string]string{"name": ix.Name, "kind": ix.Kind})
+			}
+			result["indexes"] = ixs
+		}
+		return false, rw.ok(result)
 
 	case "auth":
 		role, err := s.auth.check(args)
@@ -51,6 +54,9 @@ func (s *Server) dispatch(rw respWriter, r *bufio.Reader, line []byte, st *connS
 	}
 
 	switch cmd {
+	case "ping":
+		return false, rw.ok("pong")
+
 	// ---- reads (parallel under the core's RLock) ----
 	case "get":
 		if len(args) != 1 {

@@ -147,7 +147,10 @@ authenticates **once per connection** with the `auth` command.
   ops:secretB:admin       # role "admin": everything (compact, reindex)
   ```
 
-Before auth, only `auth`, `ping`, `hello`, and `quit` are accepted.
+Before auth, only `auth`, `hello`, and `quit` are accepted — the same
+pre-auth allowlist as redis (`ping` deliberately requires auth, as in redis).
+Pre-auth `hello` reports the server name, version, and auth mode (so a client
+knows how to log in) but hides the index schema until authenticated.
 
 ## Protocol
 

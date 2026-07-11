@@ -320,7 +320,7 @@ func (s *Server) handleConn(c net.Conn) {
 }
 
 // requireAuth guards a command: unauthenticated connections may only run
-// auth/ping/hello/quit.
+// auth/hello/quit (redis's pre-auth allowlist — ping deliberately excluded).
 func (st *connState) requireAuth() error {
 	if !st.authed {
 		return fmt.Errorf("auth required")
