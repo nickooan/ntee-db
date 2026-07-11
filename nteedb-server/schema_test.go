@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	nteedb "github.com/nickooan/ntee-db/nteedb-core"
 )
@@ -74,6 +75,77 @@ func TestLoadSchemaRejectsBadInput(t *testing.T) {
 	}
 	if _, err := LoadSchema(filepath.Join(t.TempDir(), "missing.json")); err == nil {
 		t.Error("missing file: expected error")
+	}
+}
+
+func TestAutoCompactConfigForms(t *testing.T) {
+	load := func(t *testing.T, autoCompact string) *Schema {
+		t.Helper()
+		s, err := LoadSchema(writeTemp(t, "s.json", `{"dir":"/tmp/x","autoCompact":`+autoCompact+`}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	// Bool forms (backward compatible).
+	if s := load(t, "true"); !s.AutoCompact.Enabled {
+		t.Error("bool true: should be enabled")
+	}
+	if s := load(t, "false"); s.AutoCompact.Enabled {
+		t.Error("bool false: should be disabled")
+	}
+
+	// Object form implies enabled; set fields land, unset stay nil.
+	s := load(t, `{"mainRatio":0.3,"blobsRelieve":false,"blobMinRelieveDataSize":1024}`)
+	ac := s.AutoCompact
+	if !ac.Enabled || *ac.MainRatio != 0.3 || *ac.BlobsRelieve != false || *ac.BlobMinRelieveDataSize != 1024 {
+		t.Errorf("object form: %+v", ac)
+	}
+	if ac.MainMinBytes != nil || ac.BlobRatio != nil || ac.IntervalSeconds != nil {
+		t.Errorf("unset fields must stay nil: %+v", ac)
+	}
+
+	// Explicit enabled:false wins over the object-implies-enabled rule.
+	if s := load(t, `{"enabled":false,"mainRatio":0.3}`); s.AutoCompact.Enabled {
+		t.Error("enabled:false object: should be disabled")
+	}
+
+	// Unknown fields rejected.
+	if _, err := LoadSchema(writeTemp(t, "s.json", `{"autoCompact":{"mainRation":0.3}}`)); err == nil {
+		t.Error("typo'd field should be rejected")
+	}
+}
+
+func TestAutoCompactConfigApply(t *testing.T) {
+	f, i, n, b := 0.3, 45, int64(2048), false
+	ac := AutoCompactConfig{
+		Enabled: true, IntervalSeconds: &i, MainRatio: &f,
+		BlobsRelieve: &b, BlobMinRelieveDataSize: &n,
+	}
+	var cfg Config
+	ac.apply(&cfg)
+	if !cfg.AutoCompact || cfg.BlobsRelieve ||
+		cfg.CompactInterval != 45*time.Second || cfg.MainRatio != 0.3 ||
+		cfg.BlobMinRelieveDataSize != 2048 {
+		t.Errorf("apply: %+v", cfg)
+	}
+	// Unset fields stay zero so NewServer's defaults take over.
+	if cfg.MainMinBytes != 0 || cfg.BlobRatio != 0 {
+		t.Errorf("unset fields must remain zero: %+v", cfg)
+	}
+	// Enabled with no blobsRelieve field → blob trigger defaults on.
+	var cfg2 Config
+	AutoCompactConfig{Enabled: true}.apply(&cfg2)
+	if !cfg2.BlobsRelieve {
+		t.Error("blobsRelieve should default to enabled")
+	}
+	// Disabled overall → blob trigger off regardless.
+	var cfg3 Config
+	tr := true
+	AutoCompactConfig{Enabled: false, BlobsRelieve: &tr}.apply(&cfg3)
+	if cfg3.AutoCompact || cfg3.BlobsRelieve {
+		t.Errorf("disabled autoCompact must disable everything: %+v", cfg3)
 	}
 }
 

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	nteedb "github.com/nickooan/ntee-db/nteedb-core"
 )
@@ -19,12 +21,81 @@ type Schema struct {
 	HintEveryN     int           `json:"hintEveryN"`
 	Indexes        []SchemaIndex `json:"indexes"`
 
-	// AutoCompact enables the server's background compaction: when the main
-	// log's dead-space ratio crosses a threshold, the server runs Compact on
-	// its own (reads stay live; writes pend for the compaction's duration).
-	// Default false (omitted field): compaction happens only via the manual
-	// admin `compact` command.
-	AutoCompact bool `json:"autoCompact"`
+	// AutoCompact configures the server's background reclamation. Default off
+	// (omitted field): compaction happens only via the manual admin commands.
+	AutoCompact AutoCompactConfig `json:"autoCompact"`
+}
+
+// AutoCompactConfig is schema.json's "autoCompact" value — either a plain
+// bool ("autoCompact": true → enabled with all defaults) or an options
+// object tuning the policy. Pointer fields distinguish "unset" (server
+// default applies) from an explicit zero, so user-set values always win.
+type AutoCompactConfig struct {
+	Enabled                bool
+	IntervalSeconds        *int     // check cadence (default 30)
+	MainRatio              *float64 // main-log dead share triggering Compact (default 0.5)
+	MainMinBytes           *int64   // main-log size floor (default 1 MiB)
+	BlobsRelieve           *bool    // false disables the automatic BlobsRelieve trigger (default true)
+	BlobRatio              *float64 // orphaned blob share triggering BlobsRelieve (default 0.5)
+	BlobMinRelieveDataSize *int64   // blob size floor (default 64 MiB)
+}
+
+func (c *AutoCompactConfig) UnmarshalJSON(data []byte) error {
+	var b bool
+	if err := json.Unmarshal(data, &b); err == nil {
+		*c = AutoCompactConfig{Enabled: b}
+		return nil
+	}
+	var obj struct {
+		Enabled                *bool    `json:"enabled"`
+		IntervalSeconds        *int     `json:"intervalSeconds"`
+		MainRatio              *float64 `json:"mainRatio"`
+		MainMinBytes           *int64   `json:"mainMinBytes"`
+		BlobsRelieve           *bool    `json:"blobsRelieve"`
+		BlobRatio              *float64 `json:"blobRatio"`
+		BlobMinRelieveDataSize *int64   `json:"blobMinRelieveDataSize"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&obj); err != nil {
+		return fmt.Errorf("autoCompact: expected true/false or an options object: %w", err)
+	}
+	*c = AutoCompactConfig{
+		// The object form implies enabled unless "enabled": false is explicit.
+		Enabled:                obj.Enabled == nil || *obj.Enabled,
+		IntervalSeconds:        obj.IntervalSeconds,
+		MainRatio:              obj.MainRatio,
+		MainMinBytes:           obj.MainMinBytes,
+		BlobsRelieve:           obj.BlobsRelieve,
+		BlobRatio:              obj.BlobRatio,
+		BlobMinRelieveDataSize: obj.BlobMinRelieveDataSize,
+	}
+	return nil
+}
+
+// apply resolves the user's auto-compact settings onto a server Config:
+// explicitly set values win; unset values are left for NewServer's defaults.
+func (c AutoCompactConfig) apply(cfg *Config) {
+	cfg.AutoCompact = c.Enabled
+	cfg.BlobsRelieve = c.Enabled // blob trigger on by default whenever auto-compact is on
+	if c.BlobsRelieve != nil {
+		cfg.BlobsRelieve = c.Enabled && *c.BlobsRelieve
+	}
+	if c.IntervalSeconds != nil && *c.IntervalSeconds > 0 {
+		cfg.CompactInterval = time.Duration(*c.IntervalSeconds) * time.Second
+	}
+	if c.MainRatio != nil {
+		cfg.MainRatio = *c.MainRatio
+	}
+	if c.MainMinBytes != nil {
+		cfg.MainMinBytes = *c.MainMinBytes
+	}
+	if c.BlobRatio != nil {
+		cfg.BlobRatio = *c.BlobRatio
+	}
+	if c.BlobMinRelieveDataSize != nil {
+		cfg.BlobMinRelieveDataSize = *c.BlobMinRelieveDataSize
+	}
 }
 
 type SchemaIndex struct {

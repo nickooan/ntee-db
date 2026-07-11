@@ -73,8 +73,8 @@ func (db *DB) PutBatch(items []PutItem) error {
 	// Durable mode: one flush for the whole batch, blobs before the main log so
 	// the log never claims records whose blobs are not yet durable.
 	if db.opts.SyncEveryWrite {
-		if db.blobs != nil {
-			if err := db.blobs.flush(); err != nil {
+		if bs := db.curBlobs(); bs != nil {
+			if err := bs.flush(); err != nil {
 				return err
 			}
 		}

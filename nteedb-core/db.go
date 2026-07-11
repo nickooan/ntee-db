@@ -75,15 +75,15 @@ type DB struct {
 	opts     Options
 	mainPath string
 	hintPath string
-	blobPath string
 	metaPath string
 
 	mu     sync.RWMutex
 	lock   *os.File   // exclusive flock handle enforcing a single writer process
 	main   *mainLog   // append writer for main.jsonl (the main table)
 	rf     *os.File   // read handle for main.jsonl (ReadAt is concurrency-safe)
-	blobs  *blobStore // large-value side file
-	pk     *pkIndex   // in-memory primary-key index
+	blobs  map[int]*blobStore // blob side files by generation (see blobRef.Gen)
+	curGen int                // generation receiving new blob appends
+	pk     *pkIndex           // in-memory primary-key index
 	writes int        // writes since the last hint rewrite
 	closed bool
 
@@ -142,7 +142,6 @@ func Open(opts Options) (*DB, error) {
 		lock:        lock,
 		mainPath:    filepath.Join(opts.Dir, mainFile),
 		hintPath:    filepath.Join(opts.Dir, hintFile),
-		blobPath:    filepath.Join(opts.Dir, blobFile),
 		metaPath:    filepath.Join(opts.Dir, metaFile),
 		pk:          newPkIndex(),
 		indexDefs:   opts.Indexes,
@@ -183,15 +182,42 @@ func Open(opts Options) (*DB, error) {
 		_ = lg.close()
 		return nil, err
 	}
-	blobs, err := openBlobs(db.blobPath)
+	// Open every blob-file generation present (normally one; a crashed Relieve
+	// can leave a second). New appends target the highest generation — safe in
+	// every crash case, because generation files are only ever deleted by a
+	// Relieve that has just rewritten all refs away from them.
+	gens, err := discoverBlobGens(opts.Dir)
 	if err != nil {
 		_ = lg.close()
 		_ = rf.Close()
 		return nil, err
 	}
+	cur := 0
+	for _, g := range gens {
+		if g > cur {
+			cur = g
+		}
+	}
+	blobs := make(map[int]*blobStore, len(gens)+1)
+	for _, g := range append(gens, cur) { // cur is absent from gens on a fresh store
+		if _, ok := blobs[g]; ok {
+			continue
+		}
+		bs, err := openBlobs(blobGenPath(opts.Dir, g))
+		if err != nil {
+			for _, b := range blobs {
+				_ = b.close()
+			}
+			_ = lg.close()
+			_ = rf.Close()
+			return nil, err
+		}
+		blobs[g] = bs
+	}
 	db.main = lg
 	db.rf = rf
 	db.blobs = blobs
+	db.curGen = cur
 	opened = true
 	return db, nil
 }
@@ -230,12 +256,20 @@ func (db *DB) load() error {
 // that were never acknowledged durable — the record (and everything after it)
 // is part of the lost tail.
 func (db *DB) replayTail(from int64) error {
-	blobSize := int64(0)
-	if info, err := os.Stat(db.blobPath); err == nil {
-		blobSize = info.Size()
+	blobSizes := map[int]int64{}
+	blobSizeOf := func(gen int) int64 {
+		if s, ok := blobSizes[gen]; ok {
+			return s
+		}
+		var s int64
+		if info, err := os.Stat(blobGenPath(db.opts.Dir, gen)); err == nil {
+			s = info.Size()
+		}
+		blobSizes[gen] = s
+		return s
 	}
 	end, err := scanMainLog(db.mainPath, from, func(r record, off int64, n int32) error {
-		if r.Blob != nil && r.Blob.Off+int64(r.Blob.Size) > blobSize {
+		if r.Blob != nil && r.Blob.Off+int64(r.Blob.Size) > blobSizeOf(r.Blob.Gen) {
 			return errStopScan // dangling blob ref → start of the torn tail
 		}
 		if r.isTombstone() {
@@ -314,9 +348,10 @@ func (db *DB) writeHintLocked() error {
 	db.hintMu.Lock()
 	defer db.hintMu.Unlock()
 	// Flush blobs first: a main record may reference a blob, so the blob must be
-	// durable before the watermark declares that record covered.
-	if db.blobs != nil {
-		if err := db.blobs.flush(); err != nil {
+	// durable before the watermark declares that record covered. Only the
+	// current generation receives appends; older generations are immutable.
+	if bs := db.curBlobs(); bs != nil {
+		if err := bs.flush(); err != nil {
 			return err
 		}
 	}
@@ -362,7 +397,7 @@ func (db *DB) maybeWriteHintLocked() {
 		covers: db.main.size,
 		gen:    db.hintGen.Load(),
 		main:   db.main,
-		blobs:  db.blobs,
+		blobs:  db.curBlobs(),
 		path:   db.hintPath,
 	}
 	db.writes = 0
@@ -458,7 +493,7 @@ func (db *DB) Get(key string) (value []byte, ok bool, err error) {
 		return nil, false, err
 	}
 	if rec.Blob != nil {
-		v, err := db.blobs.readAt(*rec.Blob)
+		v, err := db.blobReadAt(rec.Blob)
 		if err != nil {
 			return nil, false, err
 		}
@@ -494,7 +529,7 @@ func (db *DB) GetMany(keys []string) (values [][]byte, found []bool, err error) 
 			return nil, nil, err
 		}
 		if rec.Blob != nil {
-			v, err := db.blobs.readAt(*rec.Blob)
+			v, err := db.blobReadAt(rec.Blob)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -531,8 +566,8 @@ func (db *DB) Stats() Stats {
 	if db.main != nil {
 		s.MainBytes = db.main.size
 	}
-	if db.blobs != nil {
-		s.BlobBytes = db.blobs.size
+	for _, bs := range db.blobs {
+		s.BlobBytes += bs.size
 	}
 	return s
 }
@@ -604,6 +639,18 @@ func (db *DB) PrefixScan(prefix string) ([]string, error) {
 	return keys, nil
 }
 
+// curBlobs returns the blob store new appends go to (current generation).
+func (db *DB) curBlobs() *blobStore { return db.blobs[db.curGen] }
+
+// blobReadAt resolves a blob ref against its generation's store.
+func (db *DB) blobReadAt(ref *blobRef) ([]byte, error) {
+	bs := db.blobs[ref.Gen]
+	if bs == nil {
+		return nil, fmt.Errorf("nteedb: blob generation %d missing (ref off=%d size=%d)", ref.Gen, ref.Off, ref.Size)
+	}
+	return bs.readAt(*ref)
+}
+
 // readRecord reads and decodes the record located by e from the main log.
 func (db *DB) readRecord(e pkEntry) (record, error) {
 	buf := make([]byte, e.n)
@@ -644,8 +691,8 @@ func (db *DB) Close() error {
 			err = e
 		}
 	}
-	if db.blobs != nil {
-		if e := db.blobs.close(); e != nil && err == nil {
+	for _, bs := range db.blobs {
+		if e := bs.close(); e != nil && err == nil {
 			err = e
 		}
 	}

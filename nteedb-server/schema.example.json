@@ -3,7 +3,15 @@
   "blobThreshold": 65536,
   "syncEveryWrite": false,
   "hintEveryN": 1000,
-  "autoCompact": false,
+  "autoCompact": {
+    "enabled": false,
+    "intervalSeconds": 30,
+    "mainRatio": 0.5,
+    "mainMinBytes": 1048576,
+    "blobsRelieve": true,
+    "blobRatio": 0.5,
+    "blobMinRelieveDataSize": 67108864
+  },
   "indexes": [
     { "name": "traceId", "kind": "string" },
     { "name": "kind", "kind": "string", "jsonPath": "kind" },

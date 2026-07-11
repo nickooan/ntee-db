@@ -75,9 +75,43 @@ tiny log is pointless churn).
 While a compaction runs, **reads keep working** — the core rebuilds the log
 holding only its compaction gate and takes the exclusive lock just for the final
 atomic file swap. Writes issued during the rebuild simply wait and apply once
-it finishes. Each run is logged (`auto-compact: 2114970 → 361226 bytes in
-87ms`) and counted in `stats.autoCompacts`. A manual `compact` (admin) is
-still available regardless of the flag.
+it finishes. Each run is logged (`auto-compact: main 2114970 → 361226 bytes in
+87ms`) and counted in `stats.autoCompacts`. Manual `compact` and `relieve`
+(admin) are still available regardless of the flag.
+
+The controller also watches the blob files, as an **independent trigger**: the
+core exposes the measurement (`BlobUsage`: total/live/orphaned bytes) and the
+mechanism (`BlobsRelieve`: unconditional rewrite that drops orphans); the
+policy lives here in the server — when total blob bytes reach **64 MiB** and
+≥ **50%** are orphaned (or a crashed relieve left a stray generation file),
+the server runs `BlobsRelieve`. The floor is deliberately high: a blob rewrite
+copies live blob contents, real I/O. Blob rewrites are counted in
+`stats.blobCompacts` and log as `…, blobs 91226112 → 41943040 bytes`.
+
+**Tuning.** `autoCompact` also accepts an options object (any field may be
+omitted — its default applies; an object implies `"enabled": true` unless set
+to false):
+
+```json
+"autoCompact": {
+  "enabled": true,
+  "intervalSeconds": 30,
+  "mainRatio": 0.5,
+  "mainMinBytes": 1048576,
+  "blobsRelieve": true,
+  "blobRatio": 0.5,
+  "blobMinRelieveDataSize": 67108864
+}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `intervalSeconds` | 30 | policy check cadence |
+| `mainRatio` | 0.5 | main-log dead share that triggers `Compact` |
+| `mainMinBytes` | 1 MiB | main-log size floor |
+| `blobsRelieve` | true | `false` disables the automatic blob trigger entirely (manual `relieve` still works) |
+| `blobRatio` | 0.5 | orphaned blob share that triggers `BlobsRelieve` |
+| `blobMinRelieveDataSize` | 64 MiB | blob size floor |
 
 **How long is that write-pause?** Compaction is O(live bytes) — roughly
 ~4 µs per live record (dead records are skipped, blob contents are never
@@ -186,9 +220,10 @@ response. Anything else (binary, non-JSON text) comes back wrapped:
 | `auth <password>` / `auth <user> <password>` | per connection, first |
 | `hello` | server name, version, auth mode, declared indexes |
 | `ping`, `quit` | |
-| `stats` | core stats + `liveBytes`, `connections`, `totalConns`, `commands`, `autoCompacts` |
+| `stats` | core stats + `liveBytes`, `connections`, `totalConns`, `commands`, `autoCompacts`, `blobCompacts` |
 | `dropped`, `prospective` | index lifecycle introspection |
 | `compact`, `reindex` | **admin role** — they hold the write lock while running |
+| `relieve` | **admin role** — unconditional blob reclamation (+ main-log compact); the auto-path thresholds don't apply to this explicit action |
 
 Ordinary command errors never close the connection. Protocol-level failures
 (oversized line/value, malformed data block) do, because the stream position

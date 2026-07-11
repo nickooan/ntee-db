@@ -28,7 +28,7 @@ func (db *DB) reindexTransform(rec record) (record, error) {
 
 	var value []byte
 	if rec.Blob != nil {
-		v, err := db.blobs.readAt(*rec.Blob)
+		v, err := db.blobReadAt(rec.Blob)
 		if err != nil {
 			return rec, err
 		}

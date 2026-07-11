@@ -1,8 +1,46 @@
 package nteedb
 
-import "os"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+)
 
 const blobFile = "blobs.dat"
+
+// blobGenPath returns the path of a blob-file generation: gen 0 is the
+// original "blobs.dat"; later generations (created by Relieve) are
+// "blobs.<gen>.dat".
+func blobGenPath(dir string, gen int) string {
+	if gen == 0 {
+		return filepath.Join(dir, blobFile)
+	}
+	return filepath.Join(dir, fmt.Sprintf("blobs.%d.dat", gen))
+}
+
+// discoverBlobGens lists the blob-file generations present in dir, in no
+// particular order. A fresh store yields none.
+func discoverBlobGens(dir string) ([]int, error) {
+	matches, err := filepath.Glob(filepath.Join(dir, "blobs*.dat"))
+	if err != nil {
+		return nil, err
+	}
+	gens := make([]int, 0, len(matches))
+	for _, m := range matches {
+		name := filepath.Base(m)
+		if name == blobFile {
+			gens = append(gens, 0)
+			continue
+		}
+		numeric := strings.TrimSuffix(strings.TrimPrefix(name, "blobs."), ".dat")
+		if g, err := strconv.Atoi(numeric); err == nil && g > 0 {
+			gens = append(gens, g)
+		}
+	}
+	return gens, nil
+}
 
 // blobStore is the append-only side file holding large values. Keeping big
 // values out of main.jsonl keeps that log's lines small, so index rebuilds and

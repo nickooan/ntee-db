@@ -350,11 +350,125 @@ func TestAuthRoles(t *testing.T) {
 	}
 	app.mustFail("compact", "requires admin")
 	app.mustFail("reindex", "requires admin")
+	app.mustFail("relieve", "requires admin")
 
 	ops := dial(t, srv)
 	ops.mustOK("auth ops opspw")
 	ops.mustOK("compact")
 	ops.mustOK("reindex")
+	ops.mustOK("relieve")
+}
+
+func TestRelieveCommand(t *testing.T) {
+	srv := startServer(t, testSchema(t), authNone(), Config{})
+	tc := dial(t, srv)
+
+	// The manual relieve command is unconditional (no thresholds): it rewrites
+	// blobs and compacts the main log even on a tiny store.
+	for round := 0; round < 2; round++ {
+		for i := 0; i < 20; i++ {
+			tc.mustOK(fmt.Sprintf(`put k:%02d {"round":%d}`, i, round))
+		}
+	}
+	before := tc.mustOK("stats").(map[string]any)
+
+	if r := tc.mustOK("relieve"); r != true {
+		t.Fatalf("relieve result: %v", r)
+	}
+	after := tc.mustOK("stats").(map[string]any)
+	if after["mainBytes"].(float64) >= before["mainBytes"].(float64) {
+		t.Errorf("relieve did not compact main log: %v → %v", before["mainBytes"], after["mainBytes"])
+	}
+	if after["blobCompacts"].(float64) != 1 {
+		t.Errorf("blobCompacts should be 1, got %v", after["blobCompacts"])
+	}
+	m := tc.cmd("get k:05")
+	if m["found"] != true {
+		t.Fatalf("data lost after relieve: %v", m)
+	}
+}
+
+// TestAutoCompactBlobTrigger drives the policy's blob branch deterministically:
+// tiny thresholds + blob-backed values, then a direct maybeCompact call.
+func TestAutoCompactBlobTrigger(t *testing.T) {
+	schema := testSchema(t)
+	schema.AutoCompact = AutoCompactConfig{Enabled: true}
+	schema.BlobThreshold = 64 // values ≥64 bytes become blobs
+	srv := startServer(t, schema, authNone(), Config{
+		AutoCompact:            true,
+		CompactInterval:        time.Hour, // loop never ticks; we call maybeCompact directly
+		MainMinBytes:           1,
+		BlobsRelieve:           true,
+		BlobMinRelieveDataSize: 1,
+		BlobRatio:              0.5,
+	})
+	tc := dial(t, srv)
+
+	// Two big values under one key: the first becomes an orphaned blob (50%).
+	big := fmt.Sprintf(`{"pad":%q}`, strings.Repeat("x", 100))
+	tc.raw(fmt.Sprintf("put big:1 %d\r\n%s\r\n", len(big), big))
+	tc.readResp()
+	tc.raw(fmt.Sprintf("put big:1 %d\r\n%s\r\n", len(big), big))
+	tc.readResp()
+	before := tc.mustOK("stats").(map[string]any)
+	if before["blobBytes"].(float64) != float64(2*len(big)) {
+		t.Fatalf("expected 2 blobs on disk: %v", before)
+	}
+
+	srv.maybeCompact()
+
+	after := tc.mustOK("stats").(map[string]any)
+	if after["blobCompacts"].(float64) != 1 || after["autoCompacts"].(float64) != 1 {
+		t.Fatalf("blob trigger did not fire: %v", after)
+	}
+	if after["blobBytes"].(float64) != float64(len(big)) {
+		t.Errorf("orphaned blob not reclaimed: %v", after["blobBytes"])
+	}
+	m := tc.cmd("get big:1")
+	if m["found"] != true {
+		t.Fatalf("blob value lost: %v", m)
+	}
+}
+
+// With the blob trigger disabled, orphaned blobs are ignored and only the
+// main-log branch runs.
+func TestAutoCompactBlobTriggerDisabled(t *testing.T) {
+	schema := testSchema(t)
+	schema.AutoCompact = AutoCompactConfig{Enabled: true}
+	schema.BlobThreshold = 64
+	srv := startServer(t, schema, authNone(), Config{
+		AutoCompact:            true,
+		CompactInterval:        time.Hour,
+		MainMinBytes:           1,
+		BlobsRelieve:           false, // the toggle under test
+		BlobMinRelieveDataSize: 1,
+		BlobRatio:              0.5,
+	})
+	tc := dial(t, srv)
+
+	// Three writes of one key: 2 orphaned blobs (67%) and a main-log dead
+	// ratio of ~2/3 — both branches' thresholds are crossed.
+	big := fmt.Sprintf(`{"pad":%q}`, strings.Repeat("x", 100))
+	for i := 0; i < 3; i++ {
+		tc.raw(fmt.Sprintf("put big:1 %d\r\n%s\r\n", len(big), big))
+		tc.readResp()
+	}
+
+	srv.maybeCompact()
+
+	after := tc.mustOK("stats").(map[string]any)
+	if after["blobCompacts"].(float64) != 0 {
+		t.Fatalf("blob trigger fired despite being disabled: %v", after)
+	}
+	if after["autoCompacts"].(float64) != 1 {
+		t.Fatalf("main-log branch should still have compacted: %v", after)
+	}
+	if after["blobBytes"].(float64) != float64(3*len(big)) {
+		t.Errorf("blob file must be untouched: %v", after["blobBytes"])
+	}
+	if after["mainBytes"] != after["liveBytes"] {
+		t.Errorf("main log not reclaimed: %v", after)
+	}
 }
 
 func TestParallelReads(t *testing.T) {
@@ -418,55 +532,92 @@ func TestPipelining(t *testing.T) {
 }
 
 func TestAutoCompact(t *testing.T) {
-	schema := testSchema(t)
-	schema.AutoCompact = true
-	srv := startServer(t, schema, authNone(), Config{
-		AutoCompact:     true,
-		CompactInterval: 20 * time.Millisecond,
-		CompactMinBytes: 1,
-		CompactRatio:    0.5,
-	})
-	tc := dial(t, srv)
-
 	// 40 records, then delete 30: the survivors' lines are a small fraction of
 	// a log that also holds 30 dead records and 30 tombstones — well past the
 	// 0.5 trigger.
-	for i := 0; i < 40; i++ {
-		tc.mustOK(fmt.Sprintf(`put k:%02d {"n":%d}`, i, i))
-	}
-	for i := 10; i < 40; i++ {
-		tc.mustOK(fmt.Sprintf("del k:%02d", i))
-	}
-	before := tc.mustOK("stats").(map[string]any)
-	if before["mainBytes"].(float64) <= before["liveBytes"].(float64) {
-		t.Fatalf("expected dead space before compaction: %v", before)
+	churn := func(tc *testClient) map[string]any {
+		t.Helper()
+		for i := 0; i < 40; i++ {
+			tc.mustOK(fmt.Sprintf(`put k:%02d {"n":%d}`, i, i))
+		}
+		for i := 10; i < 40; i++ {
+			tc.mustOK(fmt.Sprintf("del k:%02d", i))
+		}
+		before := tc.mustOK("stats").(map[string]any)
+		if before["mainBytes"].(float64) <= before["liveBytes"].(float64) {
+			t.Fatalf("expected dead space before compaction: %v", before)
+		}
+		return before
 	}
 
-	// Wait for the controller to fire and reclaim the log.
-	deadline := time.Now().Add(3 * time.Second)
-	var after map[string]any
-	for {
-		after = tc.mustOK("stats").(map[string]any)
-		if after["autoCompacts"].(float64) >= 1 && after["mainBytes"] == after["liveBytes"] {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("auto-compact did not run: %v", after)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if after["mainBytes"].(float64) >= before["mainBytes"].(float64) {
-		t.Fatalf("log did not shrink: before %v after %v", before["mainBytes"], after["mainBytes"])
-	}
+	// Deterministic policy check: the loop is running but its interval is far
+	// beyond the test (it can never fire mid-churn); trigger the check
+	// directly once the store is quiescent.
+	t.Run("policy", func(t *testing.T) {
+		schema := testSchema(t)
+		schema.AutoCompact = AutoCompactConfig{Enabled: true}
+		srv := startServer(t, schema, authNone(), Config{
+			AutoCompact:     true,
+			CompactInterval: time.Hour,
+			MainMinBytes:    1,
+			MainRatio:       0.5,
+		})
+		tc := dial(t, srv)
+		before := churn(tc)
 
-	// Store contents intact after compaction.
-	if got := keys(tc.mustOK("scan k:")); len(got) != 10 {
-		t.Fatalf("survivors after compact: %v", got)
-	}
-	m := tc.cmd("get k:05")
-	if m["found"] != true || m["result"].(map[string]any)["n"] != float64(5) {
-		t.Fatalf("read after compact: %v", m)
-	}
+		srv.maybeCompact()
+
+		after := tc.mustOK("stats").(map[string]any)
+		if after["autoCompacts"].(float64) != 1 {
+			t.Fatalf("expected exactly one auto-compact: %v", after)
+		}
+		if after["blobCompacts"].(float64) != 0 {
+			t.Fatalf("blob-free store must take the Compact branch: %v", after)
+		}
+		if after["mainBytes"] != after["liveBytes"] {
+			t.Fatalf("log not fully reclaimed: %v", after)
+		}
+		if after["mainBytes"].(float64) >= before["mainBytes"].(float64) {
+			t.Fatalf("log did not shrink: before %v after %v", before["mainBytes"], after["mainBytes"])
+		}
+		// Store contents intact after compaction.
+		if got := keys(tc.mustOK("scan k:")); len(got) != 10 {
+			t.Fatalf("survivors after compact: %v", got)
+		}
+		m := tc.cmd("get k:05")
+		if m["found"] != true || m["result"].(map[string]any)["n"] != float64(5) {
+			t.Fatalf("read after compact: %v", m)
+		}
+	})
+
+	// Liveness check: with a real (fast) interval the background goroutine
+	// fires on its own. A tick may land mid-churn and leave residual dead
+	// space below the trigger, so assert only that it ran — the policy
+	// subtest covers the rest.
+	t.Run("loop", func(t *testing.T) {
+		schema := testSchema(t)
+		schema.AutoCompact = AutoCompactConfig{Enabled: true}
+		srv := startServer(t, schema, authNone(), Config{
+			AutoCompact:     true,
+			CompactInterval: 20 * time.Millisecond,
+			MainMinBytes:    1,
+			MainRatio:       0.5,
+		})
+		tc := dial(t, srv)
+		churn(tc)
+
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			after := tc.mustOK("stats").(map[string]any)
+			if after["autoCompacts"].(float64) >= 1 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("auto-compact loop never fired: %v", after)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
 }
 
 func TestProtectedMode(t *testing.T) {

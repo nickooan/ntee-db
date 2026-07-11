@@ -26,7 +26,9 @@ func TestCrashRecoveryTornTail(t *testing.T) {
 	db.main.flush()
 	db.main.close()
 	db.rf.Close()
-	db.blobs.close()
+	for _, bs := range db.blobs {
+		bs.close()
+	}
 	db.lock.Close()
 	db.closed = true
 

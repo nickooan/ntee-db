@@ -87,13 +87,18 @@ func run(o cliOptions) error {
 	}
 	defer db.Close() // writes the index hint → next boot is fast
 
-	srv := NewServer(Config{Addr: o.addr, IdleTimeout: o.idle, AutoCompact: schema.AutoCompact}, db, auth, schema)
+	cfg := Config{Addr: o.addr, IdleTimeout: o.idle}
+	schema.AutoCompact.apply(&cfg) // user-set thresholds win; the rest default in NewServer
+	srv := NewServer(cfg, db, auth, schema)
 	if err := srv.Listen(); err != nil {
 		return err
 	}
 	autoCompact := "off"
-	if schema.AutoCompact {
+	switch {
+	case cfg.AutoCompact && cfg.BlobsRelieve:
 		autoCompact = "on"
+	case cfg.AutoCompact:
+		autoCompact = "on (blobs off)"
 	}
 	log.Printf("listening on %s (store %s, auth %s, %d indexes, auto-compact %s)",
 		srv.Addr(), schema.Dir, auth.mode, len(schema.Indexes), autoCompact)

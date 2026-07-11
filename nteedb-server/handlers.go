@@ -265,6 +265,7 @@ func (s *Server) dispatch(rw respWriter, r *bufio.Reader, line []byte, st *connS
 			"totalConns":   s.totalConns.Load(),
 			"commands":     s.commands.Load(),
 			"autoCompacts": s.autoCompacts.Load(),
+			"blobCompacts": s.blobCompacts.Load(),
 		})
 
 	case "dropped":
@@ -290,6 +291,18 @@ func (s *Server) dispatch(rw respWriter, r *bufio.Reader, line []byte, st *connS
 		if err := s.db.Reindex(); err != nil {
 			return false, rw.fail("%v", err)
 		}
+		return false, rw.ok(true)
+
+	case "relieve":
+		// Explicit operator action: unconditional blob rewrite (the policy
+		// thresholds only govern the automatic path).
+		if err := st.requireAdmin(cmd); err != nil {
+			return false, rw.fail("%v", err)
+		}
+		if err := s.db.BlobsRelieve(); err != nil {
+			return false, rw.fail("%v", err)
+		}
+		s.blobCompacts.Add(1)
 		return false, rw.ok(true)
 	}
 

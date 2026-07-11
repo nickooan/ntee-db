@@ -6,11 +6,11 @@ import (
 )
 
 // storeFiles are the files a store owns within its directory, including the
-// transient temp files compaction/hint writes may leave behind.
+// transient temp files compaction/hint writes may leave behind. Blob files are
+// generation-numbered (blobs.dat, blobs.<n>.dat) and removed by glob instead.
 var storeFiles = []string{
 	mainFile,
 	mainFile + ".compact",
-	blobFile,
 	hintFile,
 	hintFile + ".tmp",
 	metaFile,
@@ -24,6 +24,15 @@ var storeFiles = []string{
 func Destroy(dir string) error {
 	for _, name := range storeFiles {
 		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	gens, err := discoverBlobGens(dir)
+	if err != nil {
+		return err
+	}
+	for _, g := range gens {
+		if err := os.Remove(blobGenPath(dir, g)); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}

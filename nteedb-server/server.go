@@ -23,15 +23,26 @@ type Config struct {
 	MaxValue    int           // length-prefixed data block limit
 	Quiet       bool          // silence per-connection logs (tests)
 
-	// Auto-compaction (enabled via schema.json's "autoCompact"): every
-	// CompactInterval the server computes the main log's dead-space ratio,
-	// 1 - LiveBytes/MainBytes, and runs Compact when it reaches CompactRatio
-	// (and the log is at least CompactMinBytes — compacting tiny logs is
-	// pointless churn). Reads stay live during the compaction; writes pend.
+	// Auto-compaction policy (user-configurable via schema.json's
+	// "autoCompact" — bool or options object; see AutoCompactConfig). The core
+	// exposes only mechanisms (Compact, BlobsRelieve) and measurements
+	// (Stats, LiveBytes, BlobUsage); every threshold lives here. Reads stay
+	// live during any reclamation; writes pend.
 	AutoCompact     bool
-	CompactRatio    float64       // trigger threshold (default 0.5)
-	CompactMinBytes int64         // minimum log size to consider (default 1 MiB)
 	CompactInterval time.Duration // check cadence (default 30s)
+
+	// Main log: compact when its dead-space share reaches MainRatio and the
+	// log is at least MainMinBytes (compacting tiny logs is pointless churn).
+	MainRatio    float64 // default 0.5
+	MainMinBytes int64   // default 1 MiB
+
+	// Blobs: run BlobsRelieve when the orphaned share reaches BlobRatio and
+	// the blob files hold at least BlobMinRelieveDataSize. The floor is much
+	// higher than the main log's because a blob rewrite copies live blob
+	// contents — real I/O.
+	BlobsRelieve           bool    // enable the automatic blob trigger
+	BlobRatio              float64 // default 0.5
+	BlobMinRelieveDataSize int64   // default 64 MiB
 }
 
 type Server struct {
@@ -52,6 +63,7 @@ type Server struct {
 	totalConns   atomic.Int64
 	commands     atomic.Int64
 	autoCompacts atomic.Int64
+	blobCompacts atomic.Int64 // relieve runs that rewrote the blob file
 }
 
 func NewServer(cfg Config, db *nteedb.DB, auth *authStore, schema *Schema) *Server {
@@ -61,14 +73,20 @@ func NewServer(cfg Config, db *nteedb.DB, auth *authStore, schema *Schema) *Serv
 	if cfg.MaxValue <= 0 {
 		cfg.MaxValue = 32 << 20 // 32 MiB
 	}
-	if cfg.CompactRatio <= 0 {
-		cfg.CompactRatio = 0.5
+	if cfg.MainRatio <= 0 {
+		cfg.MainRatio = 0.5
 	}
-	if cfg.CompactMinBytes <= 0 {
-		cfg.CompactMinBytes = 1 << 20 // 1 MiB
+	if cfg.MainMinBytes <= 0 {
+		cfg.MainMinBytes = 1 << 20 // 1 MiB
 	}
 	if cfg.CompactInterval <= 0 {
 		cfg.CompactInterval = 30 * time.Second
+	}
+	if cfg.BlobRatio <= 0 {
+		cfg.BlobRatio = 0.5
+	}
+	if cfg.BlobMinRelieveDataSize <= 0 {
+		cfg.BlobMinRelieveDataSize = 64 << 20 // 64 MiB
 	}
 	return &Server{
 		cfg:    cfg,
@@ -156,30 +174,84 @@ func (s *Server) autoCompactLoop() {
 	}
 }
 
+// maybeCompact runs one pass of the server's reclamation policy. Blobs are
+// checked first: BlobsRelieve compacts the main log as part of its commit, so
+// when it runs the main-log check is moot.
 func (s *Server) maybeCompact() {
 	st := s.db.Stats()
-	if st.MainBytes < s.cfg.CompactMinBytes {
+
+	if usage, need := s.blobsNeedRelieve(st); need {
+		s.runBlobsRelieve(st, usage)
 		return
 	}
-	dead := st.MainBytes - s.db.LiveBytes()
-	ratio := float64(dead) / float64(st.MainBytes)
-	if ratio < s.cfg.CompactRatio {
-		return
+	if s.mainNeedsCompact(st) {
+		s.runMainCompact(st)
 	}
-	if !s.cfg.Quiet {
-		log.Printf("auto-compact: %.0f%% dead (%d of %d bytes), compacting", ratio*100, dead, st.MainBytes)
+}
+
+// blobsNeedRelieve decides the blob trigger: enabled, past the size floor
+// (O(1) — the O(records) BlobUsage scan only runs beyond it), and either the
+// orphaned share reached BlobRatio or a crashed relieve left multiple
+// generation files to consolidate.
+func (s *Server) blobsNeedRelieve(st nteedb.Stats) (nteedb.BlobUsage, bool) {
+	if !s.cfg.BlobsRelieve || st.BlobBytes < s.cfg.BlobMinRelieveDataSize {
+		return nteedb.BlobUsage{}, false
 	}
+	usage, err := s.db.BlobUsage()
+	if err != nil {
+		s.logf("auto-compact: blob usage check failed: %v", err)
+		return nteedb.BlobUsage{}, false
+	}
+	orphaned := float64(usage.OrphanedBytes) >= s.cfg.BlobRatio*float64(usage.TotalBytes)
+	return usage, orphaned || usage.Generations > 1
+}
+
+func (s *Server) runBlobsRelieve(st nteedb.Stats, usage nteedb.BlobUsage) {
+	s.logf("auto-compact: %d of %d blob bytes orphaned (%d generations), relieving",
+		usage.OrphanedBytes, usage.TotalBytes, usage.Generations)
 	start := time.Now()
-	if err := s.db.Compact(); err != nil {
-		if !s.closed.Load() && !s.cfg.Quiet {
-			log.Printf("auto-compact failed: %v", err)
-		}
+	if err := s.db.BlobsRelieve(); err != nil {
+		s.logf("auto-compact: relieve failed: %v", err)
 		return
 	}
 	s.autoCompacts.Add(1)
-	if !s.cfg.Quiet {
-		log.Printf("auto-compact: %d → %d bytes in %s", st.MainBytes, s.db.Stats().MainBytes, time.Since(start).Round(time.Millisecond))
+	s.blobCompacts.Add(1)
+	after := s.db.Stats()
+	s.logf("auto-compact: main %d → %d bytes, blobs %d → %d bytes in %s",
+		st.MainBytes, after.MainBytes, st.BlobBytes, after.BlobBytes,
+		time.Since(start).Round(time.Millisecond))
+}
+
+// mainNeedsCompact decides the main-log trigger: past the size floor with a
+// dead-space share of at least MainRatio.
+func (s *Server) mainNeedsCompact(st nteedb.Stats) bool {
+	if st.MainBytes < s.cfg.MainMinBytes {
+		return false
 	}
+	dead := st.MainBytes - s.db.LiveBytes()
+	return float64(dead) >= s.cfg.MainRatio*float64(st.MainBytes)
+}
+
+func (s *Server) runMainCompact(st nteedb.Stats) {
+	s.logf("auto-compact: %d of %d main-log bytes dead, compacting",
+		st.MainBytes-s.db.LiveBytes(), st.MainBytes)
+	start := time.Now()
+	if err := s.db.Compact(); err != nil {
+		s.logf("auto-compact failed: %v", err)
+		return
+	}
+	s.autoCompacts.Add(1)
+	s.logf("auto-compact: main %d → %d bytes in %s",
+		st.MainBytes, s.db.Stats().MainBytes, time.Since(start).Round(time.Millisecond))
+}
+
+// logf logs unless the server is quiet (tests) or shutting down (errors from
+// a torn-down store are noise, not news).
+func (s *Server) logf(format string, args ...any) {
+	if s.cfg.Quiet || s.closed.Load() {
+		return
+	}
+	log.Printf(format, args...)
 }
 
 // connState is one client connection's session: auth status and granted role.
