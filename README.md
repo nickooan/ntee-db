@@ -94,11 +94,24 @@ toolchain needed at install time. See
 [`nteedb-js/README.md`](nteedb-js/README.md) for the API, benchmarks vs
 `lmdb`/`better-sqlite3`, and notes.
 
+## Building the server
+
+The server is pure Go (no cgo), so every platform cross-compiles from any
+host in seconds — no Docker:
+
+```sh
+./build.sh                 # → bin/nteedb-server-{darwin-arm64,linux-amd64,linux-arm64}
+./build.sh linux-arm64     # one target
+```
+
+Linux builds are fully static — `scp` and run, no runtime dependencies.
+
 ## Development
 
 ```sh
 go test -race ./...            # core + capi + server tests
-nteedb-js/capi/build.sh        # rebuild the native libs (macOS host + Linux via Docker)
+./build.sh                     # server binaries (pure Go, cross-compiles)
+nteedb-js/capi/build.sh        # JS native libs (macOS host + Linux via Docker)
 cd nteedb-js && npm test       # Node binding tests
 ```
 

@@ -11,6 +11,17 @@ coverage.txt
 # ignore *.so / *.dylib.
 /nteedb-js/capi/capi
 
+# Server binaries: `go build` inside nteedb-server/ drops the binary there;
+# root-level builds/cross-compiles use nteedb-server-* names (-o); /bin for
+# `go build -o bin/...`.
+/nteedb-server/nteedb-server
+/nteedb-server-*
+/bin/
+
+# Scratch store created at the cwd by running the server with
+# schema.example.json (its dir is ./nteedb-data).
+/nteedb-data/
+
 # Node (nteedb-js/ also has its own scoped .gitignore)
 node_modules/
 *.tgz

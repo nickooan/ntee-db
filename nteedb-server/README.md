@@ -11,6 +11,9 @@ go run github.com/nickooan/ntee-db/nteedb-server@latest -schema schema.json
 go run ./nteedb-server -schema nteedb-server/schema.example.json
 ```
 
+Release binaries are built by the repo-root [`build.sh`](../build.sh) (pure Go,
+cross-compiles all platforms in seconds — see the root README).
+
 Concurrency: one goroutine per connection; the core's RWMutex lets reads
 (`get`/`scan`/`ix*`…) from many connections run **in parallel**, while writes
 serialize. Pipelining is supported — send several commands, read the responses
