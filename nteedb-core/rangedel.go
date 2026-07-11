@@ -13,7 +13,7 @@ package nteedb
 // RemoveByPkLess deletes every key strictly less than cutoff (the cutoff key
 // itself is kept). It returns the number of keys removed.
 func (db *DB) RemoveByPkLess(cutoff string) (int, error) {
-	db.mu.Lock()
+	db.lockWrite()
 	defer db.mu.Unlock()
 	if db.closed {
 		return 0, ErrClosed
@@ -32,7 +32,7 @@ func (db *DB) RemoveByPkLess(cutoff string) (int, error) {
 // RemoveByPkGreater deletes every key strictly greater than cutoff (the cutoff
 // key itself is kept). It returns the number of keys removed.
 func (db *DB) RemoveByPkGreater(cutoff string) (int, error) {
-	db.mu.Lock()
+	db.lockWrite()
 	defer db.mu.Unlock()
 	if db.closed {
 		return 0, ErrClosed

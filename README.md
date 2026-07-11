@@ -30,9 +30,23 @@ your app, in the same spirit as `lmdb` or SQLite in embedded mode.
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | [`nteedb-core/`](nteedb-core/) | The store itself — a Go library (`package nteedb`). Full design & API docs in its [README](nteedb-core/README.md).                    |
 | [`nteedb-js/`](nteedb-js/)     | [`ntee-db`](nteedb-js/README.md), the Node.js binding — the core compiled as a c-shared library (source in `nteedb-js/capi/`), loaded via FFI, shipped with prebuilt binaries. |
+| [`nteedb-server/`](nteedb-server/) | A standalone TCP server (redis/memcached-style daemon): text protocol, single-line JSON responses, parallel reads, optional auth. Protocol docs in its [README](nteedb-server/README.md). |
 
-Planned: a `nteedb-server` package exposing the core over the network (the JS
-binding stays server-free — it embeds the core directly).
+(The JS binding stays server-free — it embeds the core directly.)
+
+## Running the server
+
+```sh
+go run ./nteedb-server -schema nteedb-server/schema.example.json
+```
+
+```
+$ nc 127.0.0.1 6740
+put call:1 {"kind":"request"}
+{"ok":true,"result":true}
+ix kind request
+{"ok":true,"result":["call:1"]}
+```
 
 ## Using from Go
 
@@ -83,7 +97,7 @@ toolchain needed at install time. See
 ## Development
 
 ```sh
-go test -race ./...            # core + capi tests
+go test -race ./...            # core + capi + server tests
 nteedb-js/capi/build.sh        # rebuild the native libs (macOS host + Linux via Docker)
 cd nteedb-js && npm test       # Node binding tests
 ```

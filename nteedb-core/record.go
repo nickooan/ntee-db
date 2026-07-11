@@ -5,10 +5,16 @@ import (
 	"unicode/utf8"
 )
 
-// blobRef points at a value stored in the blob side file (blobs.dat).
+// blobRef points at a value stored in a blob side file. Gen selects the file
+// generation (0 → "blobs.dat", N → "blobs.N.dat"); Relieve bumps the
+// generation when it rewrites the blob file to drop orphans. The ref is
+// self-describing so reads never depend on global state, and the main-log
+// rename stays the single atomic commit point for a blob rewrite. omitempty
+// keeps gen-0 refs byte-identical to the pre-generation format.
 type blobRef struct {
 	Off  int64 `json:"o"`
 	Size int32 `json:"n"`
+	Gen  int   `json:"g,omitempty"`
 }
 
 // record is one line of the main JSONL log. Exactly one of the following holds:

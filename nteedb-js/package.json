@@ -48,6 +48,8 @@
   ],
   "scripts": {
     "build:native": "bash capi/build.sh",
+    "format": "prettier . --write",
+    "format:check": "prettier . --check",
     "test": "node --test"
   },
   "dependencies": {
@@ -55,6 +57,7 @@
   },
   "devDependencies": {
     "better-sqlite3": "^12.11.1",
-    "lmdb": "^3.5.6"
+    "lmdb": "^3.5.6",
+    "prettier": "^3.8.3"
   }
 }

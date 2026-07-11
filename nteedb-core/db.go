@@ -75,17 +75,24 @@ type DB struct {
 	opts     Options
 	mainPath string
 	hintPath string
-	blobPath string
 	metaPath string
 
 	mu     sync.RWMutex
 	lock   *os.File   // exclusive flock handle enforcing a single writer process
 	main   *mainLog   // append writer for main.jsonl (the main table)
 	rf     *os.File   // read handle for main.jsonl (ReadAt is concurrency-safe)
-	blobs  *blobStore // large-value side file
-	pk     *pkIndex   // in-memory primary-key index
+	blobs  map[int]*blobStore // blob side files by generation (see blobRef.Gen)
+	curGen int                // generation receiving new blob appends
+	pk     *pkIndex           // in-memory primary-key index
 	writes int        // writes since the last hint rewrite
 	closed bool
+
+	// The compaction gate. While a Compact/Reindex rebuild is in flight,
+	// compacting is set and every mutation waits on writable (see lockWrite) —
+	// readers (mu.RLock) never look at the flag and stay live throughout; mu
+	// is held exclusively only for the rebuild's brief final swap.
+	compacting bool
+	writable   sync.Cond // Cond.L = &db.mu; broadcast when compacting clears
 
 	// Async periodic hint machinery. The periodic hint rewrite (every
 	// HintEveryN writes) runs in a background goroutine off the write path;
@@ -135,7 +142,6 @@ func Open(opts Options) (*DB, error) {
 		lock:        lock,
 		mainPath:    filepath.Join(opts.Dir, mainFile),
 		hintPath:    filepath.Join(opts.Dir, hintFile),
-		blobPath:    filepath.Join(opts.Dir, blobFile),
 		metaPath:    filepath.Join(opts.Dir, metaFile),
 		pk:          newPkIndex(),
 		indexDefs:   opts.Indexes,
@@ -143,6 +149,7 @@ func Open(opts Options) (*DB, error) {
 		prospective: make(map[string]bool),
 		dropped:     make(map[string]ValueKind),
 	}
+	db.writable.L = &db.mu
 	for _, def := range opts.Indexes {
 		if def.Name == "" {
 			return nil, errors.New("nteedb: secondary index name is required")
@@ -175,15 +182,42 @@ func Open(opts Options) (*DB, error) {
 		_ = lg.close()
 		return nil, err
 	}
-	blobs, err := openBlobs(db.blobPath)
+	// Open every blob-file generation present (normally one; a crashed Relieve
+	// can leave a second). New appends target the highest generation — safe in
+	// every crash case, because generation files are only ever deleted by a
+	// Relieve that has just rewritten all refs away from them.
+	gens, err := discoverBlobGens(opts.Dir)
 	if err != nil {
 		_ = lg.close()
 		_ = rf.Close()
 		return nil, err
 	}
+	cur := 0
+	for _, g := range gens {
+		if g > cur {
+			cur = g
+		}
+	}
+	blobs := make(map[int]*blobStore, len(gens)+1)
+	for _, g := range append(gens, cur) { // cur is absent from gens on a fresh store
+		if _, ok := blobs[g]; ok {
+			continue
+		}
+		bs, err := openBlobs(blobGenPath(opts.Dir, g))
+		if err != nil {
+			for _, b := range blobs {
+				_ = b.close()
+			}
+			_ = lg.close()
+			_ = rf.Close()
+			return nil, err
+		}
+		blobs[g] = bs
+	}
 	db.main = lg
 	db.rf = rf
 	db.blobs = blobs
+	db.curGen = cur
 	opened = true
 	return db, nil
 }
@@ -222,12 +256,20 @@ func (db *DB) load() error {
 // that were never acknowledged durable — the record (and everything after it)
 // is part of the lost tail.
 func (db *DB) replayTail(from int64) error {
-	blobSize := int64(0)
-	if info, err := os.Stat(db.blobPath); err == nil {
-		blobSize = info.Size()
+	blobSizes := map[int]int64{}
+	blobSizeOf := func(gen int) int64 {
+		if s, ok := blobSizes[gen]; ok {
+			return s
+		}
+		var s int64
+		if info, err := os.Stat(blobGenPath(db.opts.Dir, gen)); err == nil {
+			s = info.Size()
+		}
+		blobSizes[gen] = s
+		return s
 	}
 	end, err := scanMainLog(db.mainPath, from, func(r record, off int64, n int32) error {
-		if r.Blob != nil && r.Blob.Off+int64(r.Blob.Size) > blobSize {
+		if r.Blob != nil && r.Blob.Off+int64(r.Blob.Size) > blobSizeOf(r.Blob.Gen) {
 			return errStopScan // dangling blob ref → start of the torn tail
 		}
 		if r.isTombstone() {
@@ -306,9 +348,10 @@ func (db *DB) writeHintLocked() error {
 	db.hintMu.Lock()
 	defer db.hintMu.Unlock()
 	// Flush blobs first: a main record may reference a blob, so the blob must be
-	// durable before the watermark declares that record covered.
-	if db.blobs != nil {
-		if err := db.blobs.flush(); err != nil {
+	// durable before the watermark declares that record covered. Only the
+	// current generation receives appends; older generations are immutable.
+	if bs := db.curBlobs(); bs != nil {
+		if err := bs.flush(); err != nil {
 			return err
 		}
 	}
@@ -354,7 +397,7 @@ func (db *DB) maybeWriteHintLocked() {
 		covers: db.main.size,
 		gen:    db.hintGen.Load(),
 		main:   db.main,
-		blobs:  db.blobs,
+		blobs:  db.curBlobs(),
 		path:   db.hintPath,
 	}
 	db.writes = 0
@@ -393,10 +436,21 @@ func (db *DB) writeHintAsync(snap hintSnapshot) {
 	_ = writeIndexHint(snap.path, snap.pk, snap.covers)
 }
 
+// lockWrite acquires the exclusive lock for a mutation, waiting out any
+// in-flight Compact/Reindex rebuild (Wait releases mu while blocked, so
+// readers — and the rebuild itself — proceed meanwhile). Pairs with a plain
+// db.mu.Unlock().
+func (db *DB) lockWrite() {
+	db.mu.Lock()
+	for db.compacting {
+		db.writable.Wait()
+	}
+}
+
 // Put stores value under key. Any secondary indexes with an Extract function
 // derive their value from the record automatically.
 func (db *DB) Put(key string, value []byte) error {
-	db.mu.Lock()
+	db.lockWrite()
 	defer db.mu.Unlock()
 	if db.closed {
 		return ErrClosed
@@ -409,7 +463,7 @@ func (db *DB) Put(key string, value []byte) error {
 // index Extract function. An unknown index name or a value of the wrong kind is
 // an error and nothing is written.
 func (db *DB) PutIndexed(key string, value []byte, idx IndexValues) error {
-	db.mu.Lock()
+	db.lockWrite()
 	defer db.mu.Unlock()
 	if db.closed {
 		return ErrClosed
@@ -419,12 +473,11 @@ func (db *DB) PutIndexed(key string, value []byte, idx IndexValues) error {
 
 // Get returns the value stored under key. ok is false if the key is absent.
 //
-// Note: this holds db.mu.RLock across the pread, and Compact holds the exclusive
-// Lock for its whole duration — so a read that arrives during a Compact stalls
-// until it finishes. Fine when Compact is occasional (its whole point is to run
-// rarely); a compaction-heavy workload would want online compaction (do the
-// expensive buildRewrite off the exclusive lock via a COW index clone, take the
-// lock only to replay the tail and swap). See BenchmarkGetContention.
+// Reads stay live during Compact/Reindex: their long rebuild phase only
+// raises the compaction gate (which pauses writers — see lockWrite), and mu
+// is taken exclusively just for the final file swap — so a read overlapping a
+// compaction stalls only for that brief swap. See BenchmarkGetContention and
+// TestReadsProceedDuringCompactRewrite.
 func (db *DB) Get(key string) (value []byte, ok bool, err error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -440,7 +493,7 @@ func (db *DB) Get(key string) (value []byte, ok bool, err error) {
 		return nil, false, err
 	}
 	if rec.Blob != nil {
-		v, err := db.blobs.readAt(*rec.Blob)
+		v, err := db.blobReadAt(rec.Blob)
 		if err != nil {
 			return nil, false, err
 		}
@@ -476,7 +529,7 @@ func (db *DB) GetMany(keys []string) (values [][]byte, found []bool, err error) 
 			return nil, nil, err
 		}
 		if rec.Blob != nil {
-			v, err := db.blobs.readAt(*rec.Blob)
+			v, err := db.blobReadAt(rec.Blob)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -513,10 +566,29 @@ func (db *DB) Stats() Stats {
 	if db.main != nil {
 		s.MainBytes = db.main.size
 	}
-	if db.blobs != nil {
-		s.BlobBytes = db.blobs.size
+	for _, bs := range db.blobs {
+		s.BlobBytes += bs.size
 	}
 	return s
+}
+
+// LiveBytes returns the total size of the live record lines in main.jsonl —
+// the size Compact would shrink the log to (blob contents not included).
+// Together with Stats().MainBytes it yields the dead-space ratio that
+// auto-compaction policies need: dead = MainBytes - LiveBytes. O(records):
+// walks the in-memory index; no I/O.
+func (db *DB) LiveBytes() int64 {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed {
+		return 0
+	}
+	var n int64
+	db.pk.scan(func(e pkEntry) bool {
+		n += int64(e.n)
+		return true
+	})
+	return n
 }
 
 // Has reports whether key is present without reading its value.
@@ -532,7 +604,7 @@ func (db *DB) Has(key string) bool {
 
 // Delete removes key. Deleting an absent key is a no-op.
 func (db *DB) Delete(key string) error {
-	db.mu.Lock()
+	db.lockWrite()
 	defer db.mu.Unlock()
 	if db.closed {
 		return ErrClosed
@@ -567,6 +639,18 @@ func (db *DB) PrefixScan(prefix string) ([]string, error) {
 	return keys, nil
 }
 
+// curBlobs returns the blob store new appends go to (current generation).
+func (db *DB) curBlobs() *blobStore { return db.blobs[db.curGen] }
+
+// blobReadAt resolves a blob ref against its generation's store.
+func (db *DB) blobReadAt(ref *blobRef) ([]byte, error) {
+	bs := db.blobs[ref.Gen]
+	if bs == nil {
+		return nil, fmt.Errorf("nteedb: blob generation %d missing (ref off=%d size=%d)", ref.Gen, ref.Off, ref.Size)
+	}
+	return bs.readAt(*ref)
+}
+
 // readRecord reads and decodes the record located by e from the main log.
 func (db *DB) readRecord(e pkEntry) (record, error) {
 	buf := make([]byte, e.n)
@@ -579,7 +663,9 @@ func (db *DB) readRecord(e pkEntry) (record, error) {
 // Close flushes pending state and releases resources. The DB must not be used
 // afterward.
 func (db *DB) Close() error {
-	db.mu.Lock()
+	// lockWrite waits out an in-flight compaction rebuild: Close must not
+	// tear down file handles the rebuild is still reading.
+	db.lockWrite()
 	defer db.mu.Unlock()
 	if db.closed {
 		return nil
@@ -605,8 +691,8 @@ func (db *DB) Close() error {
 			err = e
 		}
 	}
-	if db.blobs != nil {
-		if e := db.blobs.close(); e != nil && err == nil {
+	for _, bs := range db.blobs {
+		if e := bs.close(); e != nil && err == nil {
 			err = e
 		}
 	}

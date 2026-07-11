@@ -10,6 +10,10 @@ import (
 // compaction swap (the fail-stop path below is otherwise unreachable).
 var openMainLogFn = openMainLog
 
+// rewriteRecordHook, when non-nil, runs once per record inside buildRewrite —
+// a test seam to observe (and pause) the gated rebuild phase.
+var rewriteRecordHook func()
+
 // failStopLocked permanently disables the store after an unrecoverable error
 // mid-compaction-swap: the old main handles are already closed and no usable
 // replacements exist. Marking the store closed makes every later call return
@@ -19,8 +23,8 @@ func (db *DB) failStopLocked(cause error) error {
 	db.closed = true
 	db.main, db.rf = nil, nil
 	db.hintWG.Wait() // let any in-flight background hint writer finish first
-	if db.blobs != nil {
-		_ = db.blobs.close()
+	for _, bs := range db.blobs {
+		_ = bs.close()
 	}
 	if db.lock != nil {
 		_ = db.lock.Close()
@@ -33,8 +37,11 @@ func (db *DB) failStopLocked(cause error) error {
 // schema-aware: each record's ix is filtered to the currently declared indexes,
 // so fields of dropped indexes are swept away. Cost is O(live bytes): every
 // live record line — including inline values — is read and rewritten (only
-// blob CONTENTS are spared; their refs are copied verbatim). The store is
-// briefly read-only (the write lock is held).
+// blob CONTENTS are spared; their refs are copied verbatim).
+//
+// Reads stay live throughout the rebuild: Compact raises the compaction gate
+// (writes pend until it finishes — see lockWrite) and takes the exclusive
+// lock just for the brief final swap. See TestReadsProceedDuringCompactRewrite.
 //
 // Only the main log is rewritten; blob references are preserved and blobs.dat is
 // left untouched, keeping the swap a single atomic rename (crash-safe). The
@@ -42,12 +49,7 @@ func (db *DB) failStopLocked(cause error) error {
 // is lost before the rename metadata is durable, the old main.jsonl simply
 // remains and the leftover .compact file is ignored on the next open.
 func (db *DB) Compact() error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if db.closed {
-		return ErrClosed
-	}
-	return db.rewriteLocked(db.compactTransform)
+	return db.rewriteGated(db.compactTransform)
 }
 
 // compactTransform keeps a record as-is except for filtering its ix down to the
@@ -105,19 +107,78 @@ func (db *DB) filterIXKnown(ix map[string]any) map[string]any {
 	return out
 }
 
-// rewriteLocked rewrites the main log keeping only live records, applying
+// raiseGate raises the compaction gate: writers park in lockWrite until
+// lowerGate runs; readers are unaffected. It waits out any rebuild already in
+// flight, so at most one runs at a time. Returns ErrClosed on a closed store
+// (closed cannot flip while the gate is up — Close waits in lockWrite too).
+func (db *DB) raiseGate() error {
+	db.lockWrite()
+	if db.closed {
+		db.mu.Unlock()
+		return ErrClosed
+	}
+	db.compacting = true
+	db.mu.Unlock()
+	return nil
+}
+
+// lowerGate lowers the compaction gate and wakes every parked writer. It must
+// run on EVERY exit path of a raised gate (defer it right after raiseGate).
+func (db *DB) lowerGate() {
+	db.mu.Lock()
+	db.compacting = false
+	db.writable.Broadcast()
+	db.mu.Unlock()
+}
+
+// blobRewrite is the new blob generation being written alongside a Relieve
+// rewrite; nil for plain Compact/Reindex (their blob refs are copied verbatim).
+type blobRewrite struct {
+	gen   int
+	store *blobStore
+}
+
+// rewriteGated rewrites the main log keeping only live records, applying
 // transform to each, then atomically swaps the file in and rebuilds in-memory
-// state. Callers must hold db.mu. (blobs.dat is unchanged, so db.blobs stays
-// open as-is.)
-func (db *DB) rewriteLocked(transform func(record) (record, error)) error {
+// state, all behind the compaction gate.
+func (db *DB) rewriteGated(transform func(record) (record, error)) error {
+	if err := db.raiseGate(); err != nil {
+		return err
+	}
+	defer db.lowerGate()
+	return db.rewriteBody(transform, nil)
+}
+
+// rewriteBody is the rebuild + swap shared by Compact/Reindex/Relieve.
+// Callers hold the raised compaction gate: every mutation waits in lockWrite,
+// which alone makes the long buildRewrite phase safe — db.pk / db.rf /
+// db.secIndexes / db.blobs are only read concurrently (by readers under
+// mu.RLock, which keep working). db.mu is held exclusively only for the swap
+// at the end. br, when non-nil, is the new blob generation Relieve is
+// writing; it is made durable before the main rename commits refs into it,
+// and the swap retires every other generation (all refs now point at br).
+func (db *DB) rewriteBody(transform func(record) (record, error), br *blobRewrite) error {
 	newMain := db.mainPath + ".compact"
 	_ = os.Remove(newMain)
 
+	// Long phase — readers stay live, writers wait on the gate.
 	newIdx, err := db.buildRewrite(newMain, transform)
 	if err != nil {
 		_ = os.Remove(newMain)
 		return err
 	}
+	if br != nil {
+		// Blob-before-record durability order, as on the write path: the new
+		// generation must be durable before any committed record references it.
+		if err := br.store.flush(); err != nil {
+			_ = os.Remove(newMain)
+			return err
+		}
+	}
+
+	// Brief exclusive phase.
+	db.mu.Lock()
+	defer db.mu.Unlock()
 
 	// Swap: close old main handles, atomically replace the file, reopen. Past
 	// this point the old handles are gone — any failure below must fail-stop
@@ -144,8 +205,115 @@ func (db *DB) rewriteLocked(transform func(record) (record, error)) error {
 	db.pk = newIdx
 	db.rebuildSecLocked()
 	db.writes = 0
+	if br != nil {
+		// Every live ref now points at the new generation: retire the others.
+		// (A crash before these removals just leaves stray unreferenced files,
+		// consolidated by the next Relieve.)
+		for g, bs := range db.blobs {
+			_ = bs.close()
+			_ = os.Remove(blobGenPath(db.opts.Dir, g))
+			delete(db.blobs, g)
+		}
+		db.blobs[br.gen] = br.store
+		db.curGen = br.gen
+	}
 
 	return db.writeHintLocked()
+}
+
+// BlobsRelieve rewrites every blob into a fresh generation file, dropping
+// orphaned blobs and consolidating any stray generations, then retires the
+// old files. It is unconditional MECHANISM: the core applies no thresholds —
+// callers (a server's policy loop, application code) decide WHEN to run it,
+// typically from BlobUsage numbers. Because blob refs live in main-log lines
+// and the main-log rename is the atomic commit point, it necessarily compacts
+// the main log in the same pass. Same concurrency contract as Compact: reads
+// stay live throughout; writes pend on the compaction gate. Cost is O(live
+// bytes) INCLUDING blob contents (unlike Compact, which never reads them).
+func (db *DB) BlobsRelieve() error {
+	if err := db.raiseGate(); err != nil {
+		return err
+	}
+	defer db.lowerGate()
+
+	br := &blobRewrite{gen: db.curGen + 1}
+	var err error
+	if br.store, err = openBlobs(blobGenPath(db.opts.Dir, br.gen)); err != nil {
+		return err
+	}
+	transform := func(rec record) (record, error) {
+		rec, err := db.compactTransform(rec)
+		if err != nil || rec.Blob == nil {
+			return rec, err
+		}
+		val, err := db.blobReadAt(rec.Blob)
+		if err != nil {
+			return rec, err
+		}
+		ref, err := br.store.append(val)
+		if err != nil {
+			return rec, err
+		}
+		ref.Gen = br.gen
+		rec.Blob = &ref
+		return rec, nil
+	}
+	if err := db.rewriteBody(transform, br); err != nil {
+		// Pre-commit failures leave the new generation unreferenced — remove
+		// it. After a post-commit fail-stop (db.closed) the committed main log
+		// DOES reference it: keep the file so the next Open recovers.
+		db.mu.Lock()
+		dead := db.closed
+		db.mu.Unlock()
+		if !dead {
+			_ = br.store.close()
+			_ = os.Remove(blobGenPath(db.opts.Dir, br.gen))
+		}
+		return err
+	}
+	return nil
+}
+
+// BlobUsage is a point-in-time measurement of blob-file occupancy — the input
+// for deciding when to run BlobsRelieve.
+type BlobUsage struct {
+	TotalBytes    int64 `json:"totalBytes"`    // size of all generation files
+	LiveBytes     int64 `json:"liveBytes"`     // bytes referenced by live records
+	OrphanedBytes int64 `json:"orphanedBytes"` // TotalBytes - LiveBytes
+	Generations   int   `json:"generations"`   // >1 means a crashed relieve left a stray file
+}
+
+// BlobUsage computes the store's blob occupancy by reading every live
+// record's main-log LINE (blob contents are never read) under one read lock —
+// the same pattern as GetMany. O(records) small preads: cheap enough for a
+// periodic policy check, too expensive for a per-request stat.
+func (db *DB) BlobUsage() (BlobUsage, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed {
+		return BlobUsage{}, ErrClosed
+	}
+	u := BlobUsage{Generations: len(db.blobs)}
+	for _, bs := range db.blobs {
+		u.TotalBytes += bs.size
+	}
+	var scanErr error
+	db.pk.scan(func(e pkEntry) bool {
+		rec, err := db.readRecord(e)
+		if err != nil {
+			scanErr = err
+			return false
+		}
+		if rec.Blob != nil {
+			u.LiveBytes += int64(rec.Blob.Size)
+		}
+		return true
+	})
+	if scanErr != nil {
+		return BlobUsage{}, scanErr
+	}
+	u.OrphanedBytes = u.TotalBytes - u.LiveBytes
+	return u, nil
 }
 
 // buildRewrite writes a new main log at path containing only the current live
@@ -163,6 +331,9 @@ func (db *DB) buildRewrite(path string, transform func(record) (record, error)) 
 	var off int64
 	var scanErr error
 	db.pk.scan(func(e pkEntry) bool { // ascending key order → newIdx.load bulk path
+		if rewriteRecordHook != nil {
+			rewriteRecordHook()
+		}
 		rec, err := db.readRecord(e)
 		if err != nil {
 			scanErr = err

@@ -394,13 +394,15 @@ func (db *DB) appendRecordLocked(key string, value []byte, ix map[string]any, du
 	// (values >= BlobThreshold), so the extra fsync on the fast path is cheap.
 	rec := record{Key: key, Value: value, IX: ix}
 	if db.useBlobFor(len(value)) {
-		ref, err := db.blobs.append(value)
+		bs := db.curBlobs()
+		ref, err := bs.append(value)
 		if err != nil {
 			return err
 		}
-		if err := db.blobs.flush(); err != nil {
+		if err := bs.flush(); err != nil {
 			return err
 		}
+		ref.Gen = db.curGen
 		rec = record{Key: key, Blob: &ref, IX: ix}
 	}
 

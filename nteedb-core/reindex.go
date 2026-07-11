@@ -3,22 +3,20 @@ package nteedb
 // Reindex rewrites every live record, re-deriving secondary index values via
 // each declared index's Extract function — back-filling indexes that were added
 // (or whose kind changed) after records already existed. It also reclaims dead
-// space and drops ix fields of undeclared indexes. The store is briefly
-// read-only (write lock held); it is O(table) and reads every record's value
-// (including blobs), so it is a deliberate, occasional operation.
+// space and drops ix fields of undeclared indexes. Reads stay live during the
+// O(table) rebuild (writes pend on the compaction gate; mu is exclusive only
+// for the final swap); it reads every record's value (including blobs), so it
+// is a deliberate, occasional operation.
 //
 // Only Extract-based indexes can be back-filled. Explicit-value indexes (no
 // Extract) cannot — their historical values were never recorded anywhere — and
 // remain prospective afterward.
 func (db *DB) Reindex() error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if db.closed {
-		return ErrClosed
-	}
-	if err := db.rewriteLocked(db.reindexTransform); err != nil {
+	if err := db.rewriteGated(db.reindexTransform); err != nil {
 		return err
 	}
+	db.lockWrite()
+	defer db.mu.Unlock()
 	return db.markReindexedLocked()
 }
 
@@ -30,7 +28,7 @@ func (db *DB) reindexTransform(rec record) (record, error) {
 
 	var value []byte
 	if rec.Blob != nil {
-		v, err := db.blobs.readAt(*rec.Blob)
+		v, err := db.blobReadAt(rec.Blob)
 		if err != nil {
 			return rec, err
 		}

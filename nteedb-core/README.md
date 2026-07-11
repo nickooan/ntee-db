@@ -55,7 +55,23 @@ import nteedb "github.com/nickooan/ntee-db/nteedb-core"
   `covers` watermark; a missing/corrupt hint safely falls back to a full scan.
   A torn final line from a crash mid-append is detected and truncated.
 - **Compaction** rewrites the main log with only live records (dropping
-  superseded versions and tombstones) via a single atomic rename.
+  superseded versions and tombstones) via a single atomic rename. **Reads stay
+  live during the rewrite**: Compact/Reindex/BlobsRelieve raise only an internal
+  compaction gate for the long rebuild (writes pend until it finishes) and take
+  the exclusive lock just for the final swap. `LiveBytes()` vs
+  `Stats().MainBytes` gives the dead-space ratio for deciding when to compact.
+- **`BlobsRelieve()` reclaims blob space; `BlobUsage()` measures it.** Plain
+  Compact never touches the blob file, so orphaned blobs (overwritten/deleted
+  large values) accumulate. `BlobsRelieve` rewrites every live blob into a new
+  generation file (`blobs.<n>.dat`), dropping the orphans — unconditionally:
+  the core ships the *mechanism*, and the caller (a server's policy loop,
+  application code) decides *when*, typically from `BlobUsage()`
+  (total/live/orphaned bytes + generation count; O(records) small reads).
+  Each blob ref names its generation, so the main-log rename stays the single
+  atomic commit point — a crash on either side of it leaves a consistent store
+  plus at most one stray unreferenced file, consolidated by the next
+  BlobsRelieve. It compacts the main log in the same pass (the rewritten refs
+  live there).
 - **Single writer per store.** `Open` takes an exclusive, non-blocking kernel
   lock (`flock`) on `<dir>/LOCK`; a second process gets `ErrLocked` and can
   degrade gracefully (e.g. run without its cache). The lock is tied to the
@@ -211,7 +227,7 @@ db.Compact()
 | Field            | Meaning                                                                                                                                                                                                                                                                                                                                                     |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Dir`            | Store directory (required).                                                                                                                                                                                                                                                                                                                                 |
-| `BlobThreshold`  | Values ≥ this many bytes go to `blobs.dat`. `0` → 64 KiB default; negative disables blobs. This is a layout/compaction knob, not a memory one (values are never resident regardless). Keep it generous: inline values are reclaimed by `Compact`, whereas `blobs.dat` is append-only and not yet compacted — so reserve blobs for genuinely large payloads. |
+| `BlobThreshold`  | Values ≥ this many bytes go to `blobs.dat`. `0` → 64 KiB default; negative disables blobs. This is a layout/compaction knob, not a memory one (values are never resident regardless). Keep it generous: inline values are reclaimed by every `Compact`, whereas orphaned blobs are only reclaimed when the caller runs `BlobsRelieve` — so reserve blobs for genuinely large payloads. |
 | `SyncEveryWrite` | fsync the log on every write (durable but slower). When false, a crash may lose the most recent writes.                                                                                                                                                                                                                                                     |
 | `HintEveryN`     | Rewrite the hint after N writes (also on `Close` and after compaction). `0` disables periodic rewrites. Periodic rewrites run in a **background goroutine, off the write path** — a `Put` only pays a cheap in-memory snapshot; `Close`/`Compact`/range-delete hints remain synchronous checkpoints.                                                        |
 

@@ -1,0 +1,4 @@
+node_modules
+prebuilds
+# Go module — gofmt is authoritative; keep prettier out of it.
+capi
