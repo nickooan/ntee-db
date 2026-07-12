@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -65,5 +67,25 @@ func TestIncrRequiresAuth(t *testing.T) {
 	tc.mustOK("auth s3cret")
 	if r := tc.mustOK("incr c"); r != float64(1) {
 		t.Errorf("post-auth incr = %v, want 1", r)
+	}
+}
+
+// Explicit index values require the record value to be a JSON object —
+// immediate values are primary-key-only.
+func TestPutxRejectsImmediateValue(t *testing.T) {
+	srv := startServer(t, testSchema(t), authNone(), Config{})
+	tc := dial(t, srv)
+
+	ix, value := `{"traceId":"T1"}`, `just-a-string`
+	tc.raw(fmt.Sprintf("putx k1 %d %d\r\n%s\r\n%s\r\n", len(ix), len(value), ix, value))
+	m := tc.readResp()
+	if m["ok"] != false {
+		t.Fatalf("putx with immediate value unexpectedly succeeded: %v", m)
+	}
+	if s, _ := m["err"].(string); !strings.Contains(s, "immediate value") {
+		t.Errorf("err = %q, want mention of immediate value", s)
+	}
+	if r := tc.mustOK("has k1"); r != false {
+		t.Error("rejected putx must write nothing")
 	}
 }

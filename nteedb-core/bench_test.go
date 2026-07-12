@@ -12,7 +12,7 @@ import (
 // duration) stalls readers at RLock acquisition until it finishes.
 //
 // This documents a KNOWN limitation, not a live tuning knob. The "unlocked
-// reads" idea (snapshot rf + read outside db.mu) was tried and reverted: it
+// reads" idea (snapshot reader + read outside db.mu) was tried and reverted: it
 // does not help, because readers block acquiring the RLock while Compact holds
 // the exclusive Lock — the pread never being the thing under the lock is
 // irrelevant. The real fix is online compaction (build the rewrite off the
@@ -163,7 +163,7 @@ func BenchmarkPutIndexedHotValue(b *testing.B) {
 	for i := range items {
 		items[i] = PutItem{
 			Key:   fmt.Sprintf("z%08d", i),
-			Value: []byte("value"),
+			Value: []byte(`{"v":"value"}`),
 			IX:    IndexValues{"v": "zzz"},
 		}
 	}
@@ -172,7 +172,7 @@ func BenchmarkPutIndexedHotValue(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = db.PutIndexed(fmt.Sprintf("a%08d", i), []byte("value"), IndexValues{"v": "aaa"})
+		_ = db.PutIndexed(fmt.Sprintf("a%08d", i), []byte(`{"v":"value"}`), IndexValues{"v": "aaa"})
 	}
 }
 

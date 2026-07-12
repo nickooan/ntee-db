@@ -34,6 +34,10 @@ type IndexValues = map[string]any
 // derived/supplied value is persisted in the record so the index can be rebuilt
 // at boot without re-reading values.
 //
+// Indexes cover JSON-object values only: Extract is never executed over an
+// immediate value (string, number, boolean, array, binary), and PutIndexed
+// rejects explicit values for one. Immediate values are primary-key-only.
+//
 // MaxPerValue, when > 0, caps how many records may share one value in this
 // index. A write that pushes a value's group over the cap evicts the oldest
 // record(s) — lowest primary key within the group — as a full, durable delete
@@ -518,12 +522,37 @@ func (si *secIndex) wouldSelfEvict(val any, key string) (bool, error) {
 	return key <= si.at(lo+excess-1).pk, nil
 }
 
+// isObjectValue reports whether value is shaped like a JSON object — leading
+// JSON whitespace then '{'. A cheap shape sniff, not full validation: only
+// object records may carry secondary index entries (see buildIndexValues).
+func isObjectValue(value []byte) bool {
+	for _, c := range value {
+		switch c {
+		case ' ', '\t', '\r', '\n':
+			continue
+		}
+		return c == '{'
+	}
+	return false
+}
+
 // buildIndexValues merges explicit values with values derived from index
 // Extract functions, validating each against its index's kind. It returns nil
 // when there are no secondary index values for this record.
+//
+// Only JSON-object values may carry index entries: immediate values (strings,
+// numbers, booleans, arrays, binary) are plain key:value pairs addressed by
+// primary key alone — explicit values for them are an error, and Extract
+// functions are never executed over them.
 func (db *DB) buildIndexValues(key string, value []byte, explicit IndexValues) (map[string]any, error) {
 	if len(db.secIndexes) == 0 && len(explicit) == 0 {
 		return nil, nil
+	}
+	if !isObjectValue(value) {
+		if len(explicit) > 0 {
+			return nil, fmt.Errorf("nteedb: secondary index values require a JSON object value; key %q holds an immediate value (primary-key access only)", key)
+		}
+		return nil, nil // immediate value: never run Extract
 	}
 	out := make(map[string]any)
 	for name, val := range explicit {

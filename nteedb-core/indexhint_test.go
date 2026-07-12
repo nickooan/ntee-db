@@ -47,7 +47,7 @@ func TestHintStaleThenTailReplay(t *testing.T) {
 	// Releasing the lock mirrors what the kernel does on process death.
 	db.main.flush()
 	db.main.close()
-	db.rf.Close()
+	db.reader.Close()
 	db.lock.Close()
 	db.closed = true
 
@@ -158,7 +158,7 @@ func TestAsyncHintUnderConcurrentWrites(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
 				key := fmt.Sprintf("k%d-%03d", w, i)
-				if err := db.PutIndexed(key, []byte("v"), IndexValues{"traceId": fmt.Sprintf("T%d", w)}); err != nil {
+				if err := db.PutIndexed(key, []byte(`{"v":"v"}`), IndexValues{"traceId": fmt.Sprintf("T%d", w)}); err != nil {
 					t.Errorf("put %s: %v", key, err)
 				}
 				db.Get(key)

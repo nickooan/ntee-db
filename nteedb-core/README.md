@@ -134,6 +134,14 @@ db.ByIndexPrefix("traceId", "Get", -1) // → the newest key of EACH matching va
 **grouped per distinct value** — `-1` returns the newest record of every value
 matching the prefix (e.g. the latest call per endpoint).
 
+**Only JSON-object values may carry index entries.** Immediate values —
+strings, numbers, booleans, arrays, binary — are plain key:value pairs
+addressed by primary key alone: `Extract` functions are never executed over
+them, and `PutIndexed`/`PutBatch` reject explicit index values for one (an
+error; nothing written). Enforced at write time only: legacy records indexed
+under the old rules still load and are preserved by `Compact`; they age out as
+records are rewritten.
+
 Index values are persisted in each record (and in the hint), so indexes are
 rebuilt at boot from the small main-log lines / hint alone — no value or blob
 reads. Each primary-index entry carries its record's current index values, so an
@@ -237,8 +245,9 @@ zero-padded digits — every int64 has exactly one such form). That fixed width
 is what lets an increment overwrite the digits **in place** at the same file
 offset: no log growth, no compaction pressure, and torn-write safe (a crash
 mid-write can only mix old/new digit characters, never corrupt the line).
-When an `Extract`-based index is declared, increments fall back to normal
-appends so index derivation stays correct.
+Counters never participate in secondary indexes — like every immediate value
+they are primary-key-only (find them by key or prefix scan) — so nothing can
+go stale under an in-place patch and increments always take the fast path.
 
 Counters are a distinct value type: `Incr` on a key holding any other value
 returns `ErrNotCounter`, a `Put` on a counter key demotes it to a plain value,

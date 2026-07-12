@@ -38,8 +38,8 @@ func TestFormatParseCounter(t *testing.T) {
 	bad := []string{
 		"",
 		"5",
-		"0000000000000000005",  // no sign
-		"+000000000000000005",  // 18 digits
+		"0000000000000000005",   // no sign
+		"+000000000000000005",   // 18 digits
 		"+00000000000000000005", // 20 digits
 		"+000000000000000000x",
 		"+9223372036854775808", // MaxInt64+1
@@ -271,7 +271,11 @@ func TestCompactPreservesCounter(t *testing.T) {
 	}
 }
 
-func TestIncrFallbackWhenExtractIndexed(t *testing.T) {
+// Counters never participate in secondary indexes: even with a permissive
+// Extract index declared, increments patch in place (no log growth) and the
+// counter never appears in the index — while ordinary object records on the
+// same store still get indexed.
+func TestIncrIgnoresExtractIndexes(t *testing.T) {
 	db, err := Open(Options{Dir: t.TempDir(), Indexes: []IndexDef{{
 		Name: "firstByte",
 		Kind: KindString,
@@ -291,22 +295,25 @@ func TestIncrFallbackWhenExtractIndexed(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := db.Stats().MainBytes
-	if v, err := db.Incr("c", -2); err != nil || v != -1 {
-		t.Fatalf("incr = %d,%v, want -1", v, err)
+	for _, delta := range []int64{-2, 100, -200} { // sign flips included
+		if _, err := db.Incr("c", delta); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got := db.Stats().MainBytes; got <= base {
-		t.Fatalf("expected append fallback to grow the log: %d -> %d", base, got)
+	if got := db.Stats().MainBytes; got != base {
+		t.Fatalf("incr appended despite Extract index: MainBytes %d -> %d", base, got)
 	}
-	// The Extract index must track the sign byte through the fallback writes.
-	keys, err := db.ByIndex("firstByte", "-")
-	if err != nil {
+	for _, val := range []string{"+", "-"} {
+		if keys, _ := db.ByIndex("firstByte", val); len(keys) != 0 {
+			t.Fatalf("counter leaked into index at %q: %v", val, keys)
+		}
+	}
+	// Ordinary object records on the same store still index normally.
+	if err := db.Put("doc", []byte(`{"kind":"x"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if len(keys) != 1 || keys[0] != "c" {
-		t.Fatalf(`ByIndex("firstByte","-") = %v, want ["c"]`, keys)
-	}
-	if keys, _ := db.ByIndex("firstByte", "+"); len(keys) != 0 {
-		t.Fatalf(`stale "+" index entry survived: %v`, keys)
+	if keys, _ := db.ByIndex("firstByte", "{"); len(keys) != 1 || keys[0] != "doc" {
+		t.Fatalf("object record missing from index: %v", keys)
 	}
 }
 

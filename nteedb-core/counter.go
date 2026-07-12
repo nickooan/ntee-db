@@ -77,10 +77,12 @@ func parseCounter(b []byte) (int64, bool) {
 // a plain value. An increment past the int64 range returns ErrCounterOverflow
 // and leaves the value unchanged.
 //
-// Counters are stored in a fixed-width form (see counterWidth), so on a store
-// with no Extract-based indexes an increment overwrites the digits in place —
-// no log growth, no index churn. When that fast path does not apply the
-// update falls back to a normal append.
+// Counters never participate in secondary indexes — like every immediate
+// value they are primary-key-only (find them by key or prefix scan). Because
+// nothing derives state from a counter's value, and the value is stored in a
+// fixed-width form (see counterWidth), an increment overwrites the digits in
+// place: no log growth, no index churn. Only initialization (and the
+// defensive format-mismatch path) appends a record.
 func (db *DB) Incr(key string, delta int64) (int64, error) {
 	db.lockWrite()
 	defer db.mu.Unlock()
@@ -115,10 +117,12 @@ func (db *DB) incrLocked(key string, delta int64) (int64, error) {
 	}
 	next := cur + delta
 
-	// In-place fast path: only when nothing derives state from the value —
-	// an Extract-based index recomputes entries from value bytes on every
-	// write, which a WriteAt would bypass, leaving the index stale.
-	if len(e.ix) == 0 && !db.hasExtractIndex() {
+	// In-place fast path. Counters carry no index entries (they are
+	// primary-key-only), so nothing can go stale under a byte patch. The
+	// e.ix check is a defensive invariant guard: a counter record with index
+	// entries should not exist, but if one ever does, the append fallback
+	// rewrites it with nil ix, retracting the stale entries.
+	if len(e.ix) == 0 {
 		line, err := marshalRecord(rec)
 		if err == nil && int32(len(line))+1 == e.n {
 			// Locate the value inside the marshaled line. The pattern cannot
@@ -126,11 +130,11 @@ func (db *DB) incrLocked(key string, delta int64) (int64, error) {
 			pat := append([]byte(`"s":"`), rec.Value...)
 			pat = append(pat, '"')
 			if idx := bytes.Index(line, pat); idx >= 0 {
-				if _, err := db.rwf.WriteAt(formatCounter(next), e.off+int64(idx)+5); err != nil {
+				if _, err := db.patcher.WriteAt(formatCounter(next), e.off+int64(idx)+5); err != nil {
 					return 0, err
 				}
 				if db.opts.SyncEveryWrite {
-					if err := db.rwf.Sync(); err != nil {
+					if err := db.patcher.Sync(); err != nil {
 						return 0, err
 					}
 				}
@@ -143,32 +147,13 @@ func (db *DB) incrLocked(key string, delta int64) (int64, error) {
 	return next, db.incrAppendLocked(key, next)
 }
 
-// hasExtractIndex reports whether any declared index derives its value from
-// record bytes (as opposed to explicit PutIndexed args).
-func (db *DB) hasExtractIndex() bool {
-	for _, def := range db.indexDefs {
-		if def.Extract != nil {
-			return true
-		}
-	}
-	return false
-}
-
-// incrAppendLocked writes the counter's new value as a normal appended record
-// — writeLocked with the counter flag set. Callers must hold db.mu.
+// incrAppendLocked appends the counter's new value as a fresh record. Counters
+// are pure key:value pairs — no secondary index derivation, no eviction
+// bookkeeping — so this is a bare append with the counter flag set (nil ix
+// also retracts any stale index entries if a legacy record carried them).
+// Callers must hold db.mu.
 func (db *DB) incrAppendLocked(key string, v int64) error {
-	value := formatCounter(v)
-	ix, err := db.buildIndexValues(key, value, nil)
-	if err != nil {
-		return err
-	}
-	if err := db.checkSelfEvictionLocked(key, ix); err != nil {
-		return err
-	}
-	if err := db.appendRecordLocked(key, value, ix, db.opts.SyncEveryWrite, true); err != nil {
-		return err
-	}
-	if err := db.enforceMaxPerValueLocked(ix); err != nil {
+	if err := db.appendRecordLocked(key, formatCounter(v), nil, db.opts.SyncEveryWrite, true); err != nil {
 		return err
 	}
 	db.writes++
