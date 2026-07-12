@@ -100,6 +100,23 @@ func nteedb_put(h C.uint, key *C.char, val *C.uchar, valLen C.int, ixJSON *C.cha
 	return reply(nil, db.PutIndexed(C.GoString(key), value, ix))
 }
 
+// nteedb_incr atomically adds delta (negative to decrement) to the int64
+// counter at key, returning the new value. The JS wrapper's decr is this with
+// a negated delta.
+//
+//export nteedb_incr
+func nteedb_incr(h C.uint, key *C.char, delta C.longlong) *C.char {
+	db := regGet(uint32(h))
+	if db == nil {
+		return reply(nil, errInvalidHandle)
+	}
+	v, err := db.Incr(C.GoString(key), int64(delta))
+	if err != nil {
+		return reply(nil, err)
+	}
+	return reply(v, nil)
+}
+
 // valJSON is one value on the inline-JSON read path. A value that is valid JSON
 // is spliced verbatim into JSON (no escaping) so the JS envelope parse yields
 // the object directly; binary / non-JSON falls back to base64.
