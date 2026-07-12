@@ -92,6 +92,7 @@ extern char* nteedb_close(unsigned int h);
 extern char* nteedb_drop(unsigned int h);
 extern char* nteedb_destroy(char* dir);
 extern char* nteedb_put(unsigned int h, char* key, unsigned char* val, int valLen, char* ixJSON);
+extern char* nteedb_incr(unsigned int h, char* key, long long int delta);
 extern char* nteedb_get_json(unsigned int h, char* key);
 extern char* nteedb_get_many_json(unsigned int h, char* keysJSON);
 extern char* nteedb_has(unsigned int h, char* key);

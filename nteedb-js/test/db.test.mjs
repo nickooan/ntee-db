@@ -55,10 +55,11 @@ test("putMany batches records (order, indexes, validation, caps)", async () => {
   await withDB(
     { indexes: [{ name: "traceId", kind: "string", maxPerValue: 2 }] },
     async (db) => {
+      // Indexed values must be JSON objects (immediate values are PK-only).
       const n = await db.putMany([
-        { key: "call:1", value: "a", ix: { traceId: "T" } },
-        { key: "call:2", value: Buffer.from("b"), ix: { traceId: "T" } },
-        { key: "call:3", value: "c", ix: { traceId: "T" } },
+        { key: "call:1", value: { v: "a" }, ix: { traceId: "T" } },
+        { key: "call:2", value: { v: "b" }, ix: { traceId: "T" } },
+        { key: "call:3", value: { v: "c" }, ix: { traceId: "T" } },
         { key: "other:1", value: "x" },
         { key: "other:1", value: "y" }, // later item for the same key wins
       ])
@@ -66,7 +67,7 @@ test("putMany batches records (order, indexes, validation, caps)", async () => {
 
       // Values round-trip; last write in the batch wins.
       assert.equal((await db.get("other:1")).toString(), "y")
-      assert.equal((await db.get("call:2")).toString(), "b")
+      assert.deepEqual(await db.get("call:2"), { v: "b" })
 
       // maxPerValue applied across the batch: only the newest 2 remain.
       assert.deepEqual(await db.secIndex("traceId", "T"), ["call:2", "call:3"])
@@ -76,11 +77,18 @@ test("putMany batches records (order, indexes, validation, caps)", async () => {
       await assert.rejects(
         db.putMany([
           { key: "ok:1", value: "v" },
-          { key: "bad:1", value: "v", ix: { nope: "x" } },
+          { key: "bad:1", value: "{}", ix: { nope: "x" } },
         ]),
         /unknown index/,
       )
       assert.equal(await db.has("ok:1"), false)
+
+      // An immediate (non-object) value cannot carry index values at all.
+      await assert.rejects(
+        db.putMany([{ key: "bad:2", value: "scalar", ix: { traceId: "T" } }]),
+        /immediate value/,
+      )
+      assert.equal(await db.has("bad:2"), false)
 
       // A JSON value reads back parsed; binary and a BOM-prefixed value are
       // non-JSON → byte-exact Buffers.
@@ -284,9 +292,9 @@ test("secIndexPrefix grouped +/-N limit + secIndexPrefixRecords records", async 
     async (db) => {
       // Two records under GetXXXMutation, one under GetXXXMumu. Sorted by
       // (value, pk): GetXXXMumu < GetXXXMutation ('m' < 't').
-      db.put("call:1", "a", { endpoint: "GetXXXMutation" })
-      db.put("call:2", "b", { endpoint: "GetXXXMutation" })
-      db.put("call:3", "c", { endpoint: "GetXXXMumu" })
+      db.put("call:1", { v: "a" }, { endpoint: "GetXXXMutation" })
+      db.put("call:2", { v: "b" }, { endpoint: "GetXXXMutation" })
+      db.put("call:3", { v: "c" }, { endpoint: "GetXXXMumu" })
 
       // limit 0 (default) is unchanged: all matches, flat, in (value, pk) order.
       assert.deepEqual(await db.secIndexPrefix("endpoint", "GetXXXM"), [
@@ -311,8 +319,8 @@ test("secIndexPrefix grouped +/-N limit + secIndexPrefixRecords records", async 
         recs.map((r) => r.key),
         ["call:3", "call:2"],
       )
-      assert.equal(recs[0].value.toString(), "c")
-      assert.equal(recs[1].value.toString(), "b")
+      assert.deepEqual(recs[0].value, { v: "c" })
+      assert.deepEqual(recs[1].value, { v: "b" })
     },
   )
 })
@@ -348,17 +356,17 @@ test("maxPerValue caps records per index value (oldest evicted)", async () => {
   await withDB(
     { indexes: [{ name: "traceId", kind: "string", maxPerValue: 2 }] },
     async (db) => {
-      db.put("call:1", "a", { traceId: "T" })
-      db.put("call:2", "b", { traceId: "T" })
+      db.put("call:1", { v: "a" }, { traceId: "T" })
+      db.put("call:2", { v: "b" }, { traceId: "T" })
       // Third record with the same value: lowest pk (call:1) is fully deleted.
-      db.put("call:3", "c", { traceId: "T" })
+      db.put("call:3", { v: "c" }, { traceId: "T" })
 
       assert.equal(await db.get("call:1"), null)
       assert.equal(await db.has("call:1"), false)
       assert.deepEqual(await db.secIndex("traceId", "T"), ["call:2", "call:3"])
 
       // A different value has its own budget.
-      db.put("other:1", "x", { traceId: "U" })
+      db.put("other:1", { v: "x" }, { traceId: "U" })
       assert.deepEqual(await db.secIndex("traceId", "U"), ["other:1"])
       assert.deepEqual(await db.secIndex("traceId", "T"), ["call:2", "call:3"])
     },
@@ -461,12 +469,57 @@ test("error surfaces as thrown Error", async () => {
     { indexes: [{ name: "status", kind: "number" }] },
     async (db) => {
       assert.throws(
-        () => db.put("k", "v", { unknownIndex: "x" }),
+        () => db.put("k", "{}", { unknownIndex: "x" }),
         /unknown index/,
+      )
+      // Explicit index values on an immediate (non-object) value are rejected.
+      assert.throws(
+        () => db.put("k", "scalar", { status: 200 }),
+        /immediate value/,
       )
       await assert.rejects(db.secIndex("nope", "x"), /unknown index/)
     },
   )
+})
+
+test("incr/decr: atomic int64 counters", async () => {
+  await withDB({}, async (db) => {
+    // Missing key initializes to 0; delta defaults to 1.
+    assert.equal(await db.incr("hits"), 1)
+    assert.equal(await db.incr("hits", 41), 42)
+    assert.equal(await db.decr("hits", 2), 40)
+    assert.equal(await db.decr("hits"), 39)
+    // Read idiom: delta 0 returns the current value.
+    assert.equal(await db.incr("hits", 0), 39)
+    // Negative init and sign crossing.
+    assert.equal(await db.incr("neg", -100), -100)
+    assert.equal(await db.incr("neg", 150), 50)
+
+    // Counters are a distinct type: incr on a plain value rejects, untouched.
+    db.put("plain", "hello")
+    await assert.rejects(db.incr("plain"), /non-counter/)
+    assert.equal((await db.get("plain")).toString(), "hello")
+
+    // Deltas must be safe integers — rejected synchronously.
+    assert.throws(() => db.incr("hits", 1.5), TypeError)
+    assert.throws(() => db.decr("hits", NaN), TypeError)
+  })
+})
+
+test("counters persist across close/reopen", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "nteedb-"))
+  try {
+    let db = NteeDB.open(dir, {})
+    assert.equal(await db.incr("c", 7), 7)
+    assert.equal(await db.incr("c", 7), 14)
+    db.close()
+
+    db = NteeDB.open(dir, {})
+    assert.equal(await db.incr("c", 0), 14)
+    db.close()
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test("drop deletes the store", async () => {
@@ -555,6 +608,8 @@ test("operations on a closed handle throw", async () => {
     for (const op of [
       () => db.get("a"),
       () => db.put("b", { n: 2 }),
+      () => db.incr("c"),
+      () => db.decr("c"),
       () => db.stats(),
       () => db.prefixScan(""),
       () => db.drop(),

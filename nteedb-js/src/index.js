@@ -80,6 +80,37 @@ export class NteeDB {
   }
 
   /**
+   * Atomically add `delta` (default 1) to the int64 counter at `key` and
+   * resolve to the new value. A missing key initializes to 0 before the delta
+   * applies, so `incr(key, 0)` reads a counter (creating it at 0 if absent).
+   * Counters are a distinct value type: incr on a key holding any other value
+   * rejects ("non-counter value"), a put() on a counter key demotes it to a
+   * plain value, and overflowing int64 rejects leaving the value unchanged.
+   * Counters never participate in secondary indexes (primary-key-only), and
+   * increments update the record in place — a hot counter never grows the log.
+   * Deltas must be safe integers (|delta| ≤ 2^53-1); counter values beyond
+   * that range lose precision as JS numbers.
+   */
+  incr(key, delta = 1) {
+    this.#assertOpen()
+    if (!Number.isSafeInteger(delta))
+      throw new TypeError("nteedb: delta must be a safe integer")
+    return callAsync(fns.incr, this.#h, key, delta)
+  }
+
+  /**
+   * Atomically subtract `delta` (default 1) from the counter at `key` and
+   * resolve to the new value — incr() with a negated delta; see incr() for
+   * counter semantics.
+   */
+  decr(key, delta = 1) {
+    this.#assertOpen()
+    if (!Number.isSafeInteger(delta))
+      throw new TypeError("nteedb: delta must be a safe integer")
+    return callAsync(fns.incr, this.#h, key, -delta)
+  }
+
+  /**
    * Append many records in one batch — the bulk counterpart to put() for
    * imports and other high-volume writes: one FFI crossing, one lock, one
    * fsync in durable mode. Items are applied in array order (a repeated key's

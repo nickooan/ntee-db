@@ -213,6 +213,7 @@ if (Buffer.isBuffer(v)) {
 | `NteeDB.destroy(dir)`                                         | `void`                                     | delete a store's files (no open handle)                                          |
 | `put(key, value, ix?)`                                        | `void`                                     | `value`: object\|string\|Buffer (object → JSON); `ix`: `{name: string\|number}`  |
 | `putMany(items)`                                              | `Promise<number>`                          | one batch off the event loop; in-order; all-or-nothing validation                |
+| `incr(key, delta?)` / `decr(key, delta?)`                     | `Promise<number>`                          | atomic int64 counter; delta defaults to 1; resolves to the new value; **async**  |
 | `get(key)`                                                    | `Promise<value \| null>`                   | the stored JSON parsed (a Buffer for binary/non-JSON); **async** (off the loop)  |
 | `getMany(keys)`                                               | `Promise<(value\|null)[]>`                 | batched get, one crossing, aligned to `keys`; **async** (off the event loop)     |
 | `has(key)`                                                    | `Promise<boolean>`                         | **async** (off the loop)                                                         |
@@ -228,6 +229,18 @@ if (Buffer.isBuffer(v)) {
 
 ## Notes / limitations
 
+- **Counters**: `incr`/`decr` provide atomic int64 counters with Redis-style
+  semantics — a missing key initializes to 0 before the delta applies
+  (`incr(key, 0)` reads a counter, creating it at 0 if absent), the new value
+  is returned, and `incr` on a key holding any other value rejects. Counters
+  are primary-key-only (never in secondary indexes) and are updated **in
+  place** — a hot counter never grows the log. Deltas must be safe integers;
+  counter values beyond ±2^53 lose precision as JS numbers (the store itself
+  keeps full int64 precision).
+- **Only JSON-object values can be indexed**: immediate values — strings,
+  numbers, booleans, arrays, binary — are plain key:value pairs addressed by
+  primary key alone. Supplying `ix` with one throws, and `jsonPath` extraction
+  skips them. Wrap such payloads in an object envelope if they must be indexed.
 - **Index values from JS — explicit `ix` vs `jsonPath`**: supply them per write
   via `put(..., ix)`, or declare a `jsonPath` so the store derives the value from
   the record. They trade off:

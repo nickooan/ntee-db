@@ -1,6 +1,6 @@
 {
   "name": "ntee-db",
-  "version": "0.0.3",
+  "version": "0.1.0",
   "description": "Node.js binding for nteedb — a pure-Go embedded log-structured KV store with secondary indexes supported",
   "license": "Apache-2.0",
   "author": "nickooan <nickooan@gmail.com>",

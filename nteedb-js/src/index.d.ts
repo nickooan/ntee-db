@@ -73,12 +73,33 @@ export declare class NteeDB {
   /** Delete every file of the store at `dir` (no DB need be open). */
   static destroy(dir: string): void
 
-  /** Store `value` under `key`, with optional secondary index values. */
+  /**
+   * Store `value` under `key`, with optional secondary index values. Explicit
+   * index values require the value to be a JSON object — immediate values
+   * (strings, numbers, booleans, arrays, binary) are primary-key-only and
+   * rejected with an error when `ix` is supplied.
+   */
   put(
     key: string,
     value: Value,
     ix?: { [index: string]: string | number },
   ): void
+
+  /**
+   * Atomically add `delta` (default 1) to the int64 counter at `key`; resolves
+   * to the new value. A missing key initializes to 0 first, so `incr(key, 0)`
+   * reads a counter (creating it at 0 if absent). Rejects on a key holding a
+   * non-counter value, and on int64 overflow (value left unchanged). Counters
+   * are primary-key-only (never in secondary indexes) and update in place — a
+   * hot counter never grows the log. `delta` must be a safe integer; counter
+   * values beyond ±2^53 lose precision as JS numbers.
+   */
+  incr(key: string, delta?: number): Promise<number>
+  /**
+   * Atomically subtract `delta` (default 1) from the counter at `key`;
+   * resolves to the new value. Same semantics as incr() with a negated delta.
+   */
+  decr(key: string, delta?: number): Promise<number>
   /**
    * Append many records in one batch (one FFI crossing, one lock, one fsync in
    * durable mode). Applied in array order; an invalid item rejects the whole
