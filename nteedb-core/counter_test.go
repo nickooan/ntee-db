@@ -370,3 +370,41 @@ func TestIncrConcurrent(t *testing.T) {
 		t.Fatalf("final = %d,%v, want %d", v, err, goroutines*per)
 	}
 }
+
+// BenchmarkIncr measures the in-place counter patch (read + pwrite under the
+// write lock), for comparison against BenchmarkPut's append path.
+func BenchmarkIncr(b *testing.B) {
+	db, err := Open(Options{Dir: b.TempDir()})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Incr("c", 1); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := db.Incr("c", 1); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkIncrDurable is the same with per-write fsync, the durability mode's
+// floor for every write op.
+func BenchmarkIncrDurable(b *testing.B) {
+	db, err := Open(Options{Dir: b.TempDir(), SyncEveryWrite: true})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Incr("c", 1); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := db.Incr("c", 1); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
