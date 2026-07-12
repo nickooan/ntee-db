@@ -60,7 +60,10 @@ Same shape as the JS binding's open options:
 ```
 
 `jsonPath` (dotted path into the record) derives the index value on every
-write; indexes without it take explicit values via `putx`.
+write; indexes without it take explicit values via `putx`. Either way, only
+JSON-object values are indexable: immediate values (strings, numbers,
+booleans, arrays, binary) are primary-key-only — derivation skips them and
+`putx` rejects them.
 
 ### Auto-compaction
 
@@ -195,10 +198,23 @@ Values of `number`-kind indexes are parsed from the token (`ix status 200`).
 | --- | --- | --- |
 | `put <pk> <nbytes>` + value block | Put | `true` — length-prefixed: exactly `nbytes` raw bytes follow, then a newline |
 | `put <pk> <inline value…rest of line>` | Put | `true` — sugar for single-line values |
-| `putx <pk> <ixbytes> <nbytes>` + 2 blocks | PutIndexed | `true` — index-values JSON block, then value block |
+| `putx <pk> <ixbytes> <nbytes>` + 2 blocks | PutIndexed | `true` — index-values JSON block, then value block; the value must be a JSON object (immediate values — strings, numbers, booleans, arrays, binary — are primary-key-only and cannot carry index values) |
 | `del <pk>` | Delete | `true` |
+| `incr <pk> [delta]` | Incr | new value as a JSON number (delta defaults to 1) |
+| `decr <pk> [delta]` | Incr | new value as a JSON number (delta defaults to 1) |
 | `rml <cutoff>` | RemoveByPkLess | count of deleted keys (`< cutoff`) |
 | `rmg <cutoff>` | RemoveByPkGreater | count of deleted keys (`> cutoff`) |
+
+Counters are **int64 only** — no floats, no other types. A missing key
+initializes to 0 before the delta applies, so `incr hits 0` reads a counter
+(creating it at 0 if absent). `incr`/`decr` on a key holding any non-counter
+value fails with `key holds a non-counter value`; pushing past the int64 range
+fails with `counter overflows int64` and leaves the value unchanged. A `put`
+on a counter key demotes it to a plain value. Counters never appear in
+secondary indexes (they are primary-key-only, like every immediate value) and
+are stored fixed-width (sign + 19 digits), so increments rewrite bytes in
+place instead of growing the log; plain `get` therefore returns the raw
+20-char string rather than a number — prefer `incr <pk> 0` to read one.
 
 A full `putx` frame on the wire:
 

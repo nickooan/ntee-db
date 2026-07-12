@@ -49,7 +49,7 @@ func TestProspectiveOnAddingIndexToExistingData(t *testing.T) {
 
 	// Store created with one index and some data.
 	db := mustOpenIdx(t, dir, kindIndex("traceId"))
-	db.PutIndexed("call:1", []byte("a"), IndexValues{"traceId": "T1"})
+	db.PutIndexed("call:1", []byte(`{"v":"a"}`), IndexValues{"traceId": "T1"})
 	db.Close()
 
 	// Reopen adding a new index — it's prospective (old records don't have it).
@@ -70,7 +70,7 @@ func TestProspectiveOnAddingIndexToExistingData(t *testing.T) {
 		t.Errorf("new index should not cover old records, got %v", res)
 	}
 	// But it covers new writes.
-	db2.PutIndexed("call:2", []byte("b"), IndexValues{"traceId": "T1", "session": "S1"})
+	db2.PutIndexed("call:2", []byte(`{"v":"b"}`), IndexValues{"traceId": "T1", "session": "S1"})
 	if res, _ := db2.ByIndex("session", "S1"); !eqStrs(res, []string{"call:2"}) {
 		t.Errorf("new index should cover new writes, got %v", res)
 	}
@@ -88,7 +88,7 @@ func mustOpenIdx(t *testing.T, dir string, defs ...IndexDef) *DB {
 func TestProspectivePersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
 	db := mustOpenIdx(t, dir, kindIndex("traceId"))
-	db.PutIndexed("call:1", []byte("a"), IndexValues{"traceId": "T1"})
+	db.PutIndexed("call:1", []byte(`{"v":"a"}`), IndexValues{"traceId": "T1"})
 	db.Close()
 
 	// Add an index (prospective), then close WITHOUT reindexing.
@@ -194,7 +194,7 @@ func TestReindexBackfillsBlobBackedRecord(t *testing.T) {
 func TestSoftDropCompactPreservesReindexPurges(t *testing.T) {
 	dir := t.TempDir()
 	db := mustOpenIdx(t, dir, kindIndex("traceId"))
-	db.PutIndexed("call:1", []byte("a"), IndexValues{"traceId": "T1"})
+	db.PutIndexed("call:1", []byte(`{"v":"a"}`), IndexValues{"traceId": "T1"})
 	db.Close()
 
 	// Reopen WITHOUT traceId — it's soft-dropped, not removed.
@@ -250,7 +250,7 @@ func hasDroppedMeta(m metaData, name string) bool {
 func TestSoftDropReaddRecoversData(t *testing.T) {
 	dir := t.TempDir()
 	db := mustOpenIdx(t, dir, kindIndex("traceId"))
-	db.PutIndexed("call:1", []byte("a"), IndexValues{"traceId": "T1"})
+	db.PutIndexed("call:1", []byte(`{"v":"a"}`), IndexValues{"traceId": "T1"})
 	db.Close()
 
 	// Drop it (soft), no compaction between.
@@ -274,7 +274,7 @@ func TestSoftDropReaddRecoversData(t *testing.T) {
 func TestDestroyAndDrop(t *testing.T) {
 	dir := t.TempDir()
 	db := mustOpenIdx(t, dir, kindIndex("traceId"))
-	db.PutIndexed("call:1", []byte("a"), IndexValues{"traceId": "T1"})
+	db.PutIndexed("call:1", []byte(`{"v":"a"}`), IndexValues{"traceId": "T1"})
 
 	if err := db.Drop(); err != nil {
 		t.Fatal(err)

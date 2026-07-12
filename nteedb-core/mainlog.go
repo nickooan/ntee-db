@@ -35,6 +35,73 @@ func openMainLog(path string, sync bool) (*mainLog, error) {
 	return &mainLog{f: f, size: info.Size(), sync: sync}, nil
 }
 
+// openMainLogFn is a seam so tests can inject a reopen failure into the
+// compaction swap (the fail-stop path there is otherwise unreachable).
+var openMainLogFn = openMainLog
+
+// mainHandles bundles the three fds the store keeps on main.jsonl. Each holds
+// exactly the privilege its role needs:
+//
+//   - log: O_APPEND writer — the kernel forces every write to EOF, so appends
+//     physically cannot clobber existing records (and, for the same reason,
+//     this fd cannot do the patcher's positional writes: pwrite on an O_APPEND
+//     fd ignores its offset and appends).
+//   - reader: read-only, shared by every record read — no read path can
+//     mutate the log.
+//   - patcher: O_RDWR, used ONLY by Incr's in-place counter patches; its
+//     writes hold db.mu and never change a record's length.
+//
+// The set is opened and closed as one unit so Open and the compaction swap
+// cannot drift apart.
+type mainHandles struct {
+	log     *mainLog
+	reader  *os.File
+	patcher *os.File
+}
+
+// openMainHandles opens all three main.jsonl handles, cleaning up partial
+// opens on error. The file must already exist or be creatable: the log is
+// opened first with O_CREATE, so the other two opens always find it.
+func openMainHandles(path string, sync bool) (mainHandles, error) {
+	lg, err := openMainLogFn(path, sync)
+	if err != nil {
+		return mainHandles{}, err
+	}
+	reader, err := os.Open(path)
+	if err != nil {
+		_ = lg.close()
+		return mainHandles{}, err
+	}
+	patcher, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	if err != nil {
+		_ = lg.close()
+		_ = reader.Close()
+		return mainHandles{}, err
+	}
+	return mainHandles{log: lg, reader: reader, patcher: patcher}, nil
+}
+
+// close closes every non-nil handle, returning the first error.
+func (h mainHandles) close() error {
+	var err error
+	if h.log != nil {
+		if e := h.log.close(); e != nil {
+			err = e
+		}
+	}
+	if h.reader != nil {
+		if e := h.reader.Close(); e != nil && err == nil {
+			err = e
+		}
+	}
+	if h.patcher != nil {
+		if e := h.patcher.Close(); e != nil && err == nil {
+			err = e
+		}
+	}
+	return err
+}
+
 // append writes r as one JSONL line and returns the byte offset at which it was
 // written and the total bytes written (including the trailing newline). It
 // fsyncs per write when the log was opened in durable mode.

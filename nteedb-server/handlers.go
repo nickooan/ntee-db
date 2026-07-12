@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"math"
 	"strconv"
 
 	nteedb "github.com/nickooan/ntee-db/nteedb-core"
@@ -230,6 +231,30 @@ func (s *Server) dispatch(rw respWriter, r *bufio.Reader, line []byte, st *connS
 			return false, rw.fail("%v", err)
 		}
 		return false, rw.ok(true)
+
+	case "incr", "decr":
+		if len(args) < 1 || len(args) > 2 {
+			return false, rw.fail("usage: %s <pk> [delta]", cmd)
+		}
+		delta := int64(1)
+		if len(args) == 2 {
+			var err error
+			delta, err = strconv.ParseInt(args[1], 10, 64)
+			if err != nil {
+				return false, rw.fail("%s: delta must be an integer, got %q", cmd, args[1])
+			}
+		}
+		if cmd == "decr" {
+			if delta == math.MinInt64 {
+				return false, rw.fail("decr: delta out of range")
+			}
+			delta = -delta
+		}
+		v, err := s.db.Incr(args[0], delta)
+		if err != nil {
+			return false, rw.fail("%v", err)
+		}
+		return false, rw.ok(v)
 
 	case "del":
 		if len(args) != 1 {

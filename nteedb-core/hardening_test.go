@@ -29,11 +29,11 @@ func TestSelfEvictionRejected(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	must(db.PutIndexed("k:3", []byte("a"), IndexValues{"ep": "E"}))
-	must(db.PutIndexed("k:4", []byte("b"), IndexValues{"ep": "E"}))
+	must(db.PutIndexed("k:3", []byte(`{"v":"a"}`), IndexValues{"ep": "E"}))
+	must(db.PutIndexed("k:4", []byte(`{"v":"b"}`), IndexValues{"ep": "E"}))
 
 	// Group {k:3, k:4} is full; a lower key would evict itself → rejected.
-	err = db.PutIndexed("k:2", []byte("x"), IndexValues{"ep": "E"})
+	err = db.PutIndexed("k:2", []byte(`{"v":"x"}`), IndexValues{"ep": "E"})
 	if err == nil || !strings.Contains(err.Error(), "immediately evicted") {
 		t.Fatalf("out-of-order write should be rejected, got %v", err)
 	}
@@ -46,15 +46,15 @@ func TestSelfEvictionRejected(t *testing.T) {
 	}
 
 	// Overwriting an existing member never grows the group → always allowed.
-	must(db.PutIndexed("k:3", []byte("a2"), IndexValues{"ep": "E"}))
+	must(db.PutIndexed("k:3", []byte(`{"v":"a2"}`), IndexValues{"ep": "E"}))
 	// A higher key is normal retention: allowed, evicts the oldest.
-	must(db.PutIndexed("k:5", []byte("c"), IndexValues{"ep": "E"}))
+	must(db.PutIndexed("k:5", []byte(`{"v":"c"}`), IndexValues{"ep": "E"}))
 	if got := mustBy(t, db, "ep", "E"); !eqStrs(got, []string{"k:4", "k:5"}) {
 		t.Errorf("group after k:5 = %v, want [k:4 k:5]", got)
 	}
 
 	// PutBatch validates the same rule up front: nothing is written.
-	err = db.PutBatch([]PutItem{{Key: "k:1", Value: []byte("x"), IX: IndexValues{"ep": "E"}}})
+	err = db.PutBatch([]PutItem{{Key: "k:1", Value: []byte(`{"v":"x"}`), IX: IndexValues{"ep": "E"}}})
 	if err == nil || !strings.Contains(err.Error(), "immediately evicted") {
 		t.Fatalf("batch with self-evicting item should be rejected, got %v", err)
 	}
@@ -166,7 +166,7 @@ func TestByIndexRangeEdges(t *testing.T) {
 	}
 	defer db.Close()
 	for i, v := range []int{100, 200, 300} {
-		if err := db.PutIndexed(fmt.Sprintf("k%d", i), []byte("{}"), IndexValues{"n": v}); err != nil {
+		if err := db.PutIndexed(fmt.Sprintf("k%d", i), []byte(`{"v":"{}"}`), IndexValues{"n": v}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -360,7 +360,7 @@ func TestReindexDropsWrongKindExplicitIX(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := db1.PutIndexed("k1", []byte("{}"), IndexValues{"s": "hello"}); err != nil {
+	if err := db1.PutIndexed("k1", []byte(`{"v":"{}"}`), IndexValues{"s": "hello"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db1.Close(); err != nil {

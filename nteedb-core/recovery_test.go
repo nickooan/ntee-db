@@ -25,7 +25,7 @@ func TestCrashRecoveryTornTail(t *testing.T) {
 	// release mirrors what the kernel does on process death.
 	db.main.flush()
 	db.main.close()
-	db.rf.Close()
+	db.reader.Close()
 	for _, bs := range db.blobs {
 		bs.close()
 	}

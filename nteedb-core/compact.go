@@ -6,10 +6,6 @@ import (
 	"os"
 )
 
-// openMainLogFn is a seam so tests can inject a reopen failure into the
-// compaction swap (the fail-stop path below is otherwise unreachable).
-var openMainLogFn = openMainLog
-
 // rewriteRecordHook, when non-nil, runs once per record inside buildRewrite —
 // a test seam to observe (and pause) the gated rebuild phase.
 var rewriteRecordHook func()
@@ -21,7 +17,7 @@ var rewriteRecordHook func()
 // resources are released since Close() would now be a no-op. Callers hold db.mu.
 func (db *DB) failStopLocked(cause error) error {
 	db.closed = true
-	db.main, db.rf = nil, nil
+	db.main, db.reader, db.patcher = nil, nil, nil
 	db.hintWG.Wait() // let any in-flight background hint writer finish first
 	for _, bs := range db.blobs {
 		_ = bs.close()
@@ -151,7 +147,7 @@ func (db *DB) rewriteGated(transform func(record) (record, error)) error {
 
 // rewriteBody is the rebuild + swap shared by Compact/Reindex/Relieve.
 // Callers hold the raised compaction gate: every mutation waits in lockWrite,
-// which alone makes the long buildRewrite phase safe — db.pk / db.rf /
+// which alone makes the long buildRewrite phase safe — db.pk / db.reader /
 // db.secIndexes / db.blobs are only read concurrently (by readers under
 // mu.RLock, which keep working). db.mu is held exclusively only for the swap
 // at the end. br, when non-nil, is the new blob generation Relieve is
@@ -182,26 +178,21 @@ func (db *DB) rewriteBody(transform func(record) (record, error), br *blobRewrit
 
 	// Swap: close old main handles, atomically replace the file, reopen. Past
 	// this point the old handles are gone — any failure below must fail-stop
-	// (see failStopLocked): limping on would leave db.main/db.rf pointing at
+	// (see failStopLocked): limping on would leave db.main/db.reader pointing at
 	// closed files while db.closed stays false, wedging every later call with
 	// confusing "file already closed" errors.
-	_ = db.main.close()
-	_ = db.rf.Close()
+	_ = (mainHandles{log: db.main, reader: db.reader, patcher: db.patcher}).close()
 	if err := os.Rename(newMain, db.mainPath); err != nil {
 		return db.failStopLocked(err)
 	}
 
-	lg, err := openMainLogFn(db.mainPath, db.opts.SyncEveryWrite)
+	h, err := openMainHandles(db.mainPath, db.opts.SyncEveryWrite)
 	if err != nil {
 		return db.failStopLocked(err)
 	}
-	rf, err := os.Open(db.mainPath)
-	if err != nil {
-		_ = lg.close()
-		return db.failStopLocked(err)
-	}
-	db.main = lg
-	db.rf = rf
+	db.main = h.log
+	db.reader = h.reader
+	db.patcher = h.patcher
 	db.pk = newIdx
 	db.rebuildSecLocked()
 	db.writes = 0

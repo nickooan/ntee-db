@@ -77,15 +77,16 @@ type DB struct {
 	hintPath string
 	metaPath string
 
-	mu     sync.RWMutex
-	lock   *os.File   // exclusive flock handle enforcing a single writer process
-	main   *mainLog   // append writer for main.jsonl (the main table)
-	rf     *os.File   // read handle for main.jsonl (ReadAt is concurrency-safe)
-	blobs  map[int]*blobStore // blob side files by generation (see blobRef.Gen)
-	curGen int                // generation receiving new blob appends
-	pk     *pkIndex           // in-memory primary-key index
-	writes int        // writes since the last hint rewrite
-	closed bool
+	mu      sync.RWMutex
+	lock    *os.File           // exclusive flock handle enforcing a single writer process
+	main    *mainLog           // append writer for main.jsonl (the main table)
+	reader  *os.File           // shared by every record read; read-only so no read path can ever mutate the log
+	patcher *os.File           // Incr's in-place counter patches ONLY: writes hold db.mu and never change a record's length
+	blobs   map[int]*blobStore // blob side files by generation (see blobRef.Gen)
+	curGen  int                // generation receiving new blob appends
+	pk      *pkIndex           // in-memory primary-key index
+	writes  int                // writes since the last hint rewrite
+	closed  bool
 
 	// The compaction gate. While a Compact/Reindex rebuild is in flight,
 	// compacting is set and every mutation waits on writable (see lockWrite) —
@@ -173,13 +174,8 @@ func Open(opts Options) (*DB, error) {
 		return nil, err
 	}
 
-	lg, err := openMainLog(db.mainPath, opts.SyncEveryWrite)
+	h, err := openMainHandles(db.mainPath, opts.SyncEveryWrite)
 	if err != nil {
-		return nil, err
-	}
-	rf, err := os.Open(db.mainPath)
-	if err != nil {
-		_ = lg.close()
 		return nil, err
 	}
 	// Open every blob-file generation present (normally one; a crashed Relieve
@@ -188,8 +184,7 @@ func Open(opts Options) (*DB, error) {
 	// Relieve that has just rewritten all refs away from them.
 	gens, err := discoverBlobGens(opts.Dir)
 	if err != nil {
-		_ = lg.close()
-		_ = rf.Close()
+		_ = h.close()
 		return nil, err
 	}
 	cur := 0
@@ -208,14 +203,14 @@ func Open(opts Options) (*DB, error) {
 			for _, b := range blobs {
 				_ = b.close()
 			}
-			_ = lg.close()
-			_ = rf.Close()
+			_ = h.close()
 			return nil, err
 		}
 		blobs[g] = bs
 	}
-	db.main = lg
-	db.rf = rf
+	db.main = h.log
+	db.reader = h.reader
+	db.patcher = h.patcher
 	db.blobs = blobs
 	db.curGen = cur
 	opened = true
@@ -460,8 +455,10 @@ func (db *DB) Put(key string, value []byte) error {
 
 // PutIndexed stores value under key with explicit secondary index values (e.g.
 // {"traceId": "abc", "status": 200}). Explicit values take precedence over any
-// index Extract function. An unknown index name or a value of the wrong kind is
-// an error and nothing is written.
+// index Extract function. An unknown index name, a value of the wrong kind, or
+// a non-object record value is an error and nothing is written: only JSON
+// object values may carry index entries — immediate values (strings, numbers,
+// booleans, arrays, binary) are primary-key-only.
 func (db *DB) PutIndexed(key string, value []byte, idx IndexValues) error {
 	db.lockWrite()
 	defer db.mu.Unlock()
@@ -654,7 +651,7 @@ func (db *DB) blobReadAt(ref *blobRef) ([]byte, error) {
 // readRecord reads and decodes the record located by e from the main log.
 func (db *DB) readRecord(e pkEntry) (record, error) {
 	buf := make([]byte, e.n)
-	if _, err := db.rf.ReadAt(buf, e.off); err != nil {
+	if _, err := db.reader.ReadAt(buf, e.off); err != nil {
 		return record{}, err
 	}
 	return unmarshalRecord(bytes.TrimSuffix(buf, []byte{'\n'}))
@@ -682,14 +679,9 @@ func (db *DB) Close() error {
 		if e := db.writeHintLocked(); e != nil {
 			err = e
 		}
-		if e := db.main.close(); e != nil && err == nil {
-			err = e
-		}
 	}
-	if db.rf != nil {
-		if e := db.rf.Close(); e != nil && err == nil {
-			err = e
-		}
+	if e := (mainHandles{log: db.main, reader: db.reader, patcher: db.patcher}).close(); e != nil && err == nil {
+		err = e
 	}
 	for _, bs := range db.blobs {
 		if e := bs.close(); e != nil && err == nil {

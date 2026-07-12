@@ -21,8 +21,17 @@ your app, in the same spirit as `lmdb` or SQLite in embedded mode.
 - **Prefix scans** on the primary key; **range delete** by primary key for
   time-based pruning.
 - **Fast boot** via a persisted index snapshot (hint) + log-tail replay.
-- **Hybrid memory** — only keys + offsets are resident; values and large blobs
-  stay on disk and are read on demand.
+- **Disk-sized capacity, not RAM-sized** — only keys + offsets are resident;
+  values and large blobs stay on disk and are read on demand (hot reads served
+  by the OS page cache). Unlike memory-bound stores such as Redis or
+  memcached, the dataset is limited by disk, not RAM: a 1 GB-RAM device with a
+  40 GB disk can serve ~40 GB of data, as long as the *key count* fits the
+  index budget (roughly key bytes + ~80 B of RAM per record). Degrades
+  gracefully too — cold reads get slower instead of writes being refused.
+- **Atomic int64 counters** — `Incr`/`Decr` with Redis-style semantics
+  (missing key starts at 0, new value returned). Counters are stored
+  fixed-width and updated **in place**: a hot counter never grows the log and
+  never creates compaction debt.
 - **Single-writer safety** via kernel `flock` (releases on any process exit).
   Unix (macOS/Linux) only.
 - Pure Go; the only dependency is

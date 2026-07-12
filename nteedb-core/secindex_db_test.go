@@ -34,8 +34,8 @@ func TestByIndexHas(t *testing.T) {
 	db := openIndexed(t, t.TempDir())
 	defer db.Close()
 
-	db.PutIndexed("call:1", []byte("a"), IndexValues{"traceId": "T1", "status": 200})
-	db.PutIndexed("call:2", []byte("b"), IndexValues{"traceId": "T1", "status": 404})
+	db.PutIndexed("call:1", []byte(`{"v":"a"}`), IndexValues{"traceId": "T1", "status": 200})
+	db.PutIndexed("call:2", []byte(`{"v":"b"}`), IndexValues{"traceId": "T1", "status": 404})
 
 	check := func(name string, val any, want bool) {
 		t.Helper()
@@ -68,9 +68,9 @@ func TestSecondaryMultiValueTraceId(t *testing.T) {
 	db := openIndexed(t, t.TempDir())
 	defer db.Close()
 
-	db.PutIndexed("call:1", []byte("a"), IndexValues{"traceId": "T1", "status": 200})
-	db.PutIndexed("call:2", []byte("b"), IndexValues{"traceId": "T1", "status": 404})
-	db.PutIndexed("call:3", []byte("c"), IndexValues{"traceId": "T2", "status": 200})
+	db.PutIndexed("call:1", []byte(`{"v":"a"}`), IndexValues{"traceId": "T1", "status": 200})
+	db.PutIndexed("call:2", []byte(`{"v":"b"}`), IndexValues{"traceId": "T1", "status": 404})
+	db.PutIndexed("call:3", []byte(`{"v":"c"}`), IndexValues{"traceId": "T2", "status": 200})
 
 	if got := mustBy(t, db, "traceId", "T1"); !eqStrs(got, []string{"call:1", "call:2"}) {
 		t.Errorf("traceId T1 = %v, want [call:1 call:2]", got)
@@ -90,13 +90,13 @@ func TestSecondaryOverwriteRetraction(t *testing.T) {
 	db := openIndexed(t, t.TempDir())
 	defer db.Close()
 
-	db.PutIndexed("k", []byte("v1"), IndexValues{"traceId": "OLD"})
+	db.PutIndexed("k", []byte(`{"v":"v1"}`), IndexValues{"traceId": "OLD"})
 	if got := mustBy(t, db, "traceId", "OLD"); !eqStrs(got, []string{"k"}) {
 		t.Fatalf("OLD = %v", got)
 	}
 
 	// Overwrite with a new index value: the old mapping must disappear.
-	db.PutIndexed("k", []byte("v2"), IndexValues{"traceId": "NEW"})
+	db.PutIndexed("k", []byte(`{"v":"v2"}`), IndexValues{"traceId": "NEW"})
 	if got := mustBy(t, db, "traceId", "OLD"); len(got) != 0 {
 		t.Errorf("OLD should be empty after overwrite, got %v", got)
 	}
@@ -109,9 +109,9 @@ func TestSecondaryNumberRangeAndPrefix(t *testing.T) {
 	db := openIndexed(t, t.TempDir())
 	defer db.Close()
 
-	db.PutIndexed("a", []byte("x"), IndexValues{"status": 200, "traceId": "GetOrders"})
-	db.PutIndexed("b", []byte("x"), IndexValues{"status": 204, "traceId": "GetProperty"})
-	db.PutIndexed("c", []byte("x"), IndexValues{"status": 500, "traceId": "SetX"})
+	db.PutIndexed("a", []byte(`{"v":"x"}`), IndexValues{"status": 200, "traceId": "GetOrders"})
+	db.PutIndexed("b", []byte(`{"v":"x"}`), IndexValues{"status": 204, "traceId": "GetProperty"})
+	db.PutIndexed("c", []byte(`{"v":"x"}`), IndexValues{"status": 500, "traceId": "SetX"})
 
 	got, err := db.ByIndexRange("status", 200, 299)
 	if err != nil {
@@ -137,9 +137,9 @@ func TestSecondaryPrefixGroupedLimit(t *testing.T) {
 	defer db.Close()
 
 	// GetXXXMutation has two records; GetXXXMumu one. Primary keys encode order.
-	db.PutIndexed("call:1", []byte("x"), IndexValues{"traceId": "GetXXXMutation"})
-	db.PutIndexed("call:2", []byte("x"), IndexValues{"traceId": "GetXXXMutation"})
-	db.PutIndexed("call:3", []byte("x"), IndexValues{"traceId": "GetXXXMumu"})
+	db.PutIndexed("call:1", []byte(`{"v":"x"}`), IndexValues{"traceId": "GetXXXMutation"})
+	db.PutIndexed("call:2", []byte(`{"v":"x"}`), IndexValues{"traceId": "GetXXXMutation"})
+	db.PutIndexed("call:3", []byte(`{"v":"x"}`), IndexValues{"traceId": "GetXXXMumu"})
 
 	// -1: last record of each endpoint (groups ascending by value).
 	if got, _ := db.ByIndexPrefix("traceId", "GetXXXM", -1); !eqStrs(got, []string{"call:3", "call:2"}) {
@@ -164,7 +164,7 @@ func TestRemoveByPkRangeDelete(t *testing.T) {
 		{"call:1", "T1"}, {"call:2", "T2"}, {"call:3", "T3"},
 		{"call:4", "T4"}, {"call:5", "T5"},
 	} {
-		db.PutIndexed(c.key, []byte("v"), IndexValues{"traceId": c.trace})
+		db.PutIndexed(c.key, []byte(`{"v":"v"}`), IndexValues{"traceId": c.trace})
 	}
 
 	// RemoveByPkLess is strict: "call:3" itself survives; call:1/2 go.
@@ -219,7 +219,7 @@ func TestRemoveByPkRangeDurableAfterReopen(t *testing.T) {
 	for _, c := range []struct{ key, trace string }{
 		{"call:1", "T1"}, {"call:2", "T2"}, {"call:3", "T3"},
 	} {
-		db.PutIndexed(c.key, []byte("v"), IndexValues{"traceId": c.trace})
+		db.PutIndexed(c.key, []byte(`{"v":"v"}`), IndexValues{"traceId": c.trace})
 	}
 	if _, err := db.RemoveByPkLess("call:3"); err != nil {
 		t.Fatal(err)
@@ -264,10 +264,10 @@ func TestMaxPerValueEvictsOldest(t *testing.T) {
 	db := openCapped(t, t.TempDir(), 2)
 	defer db.Close()
 
-	db.PutIndexed("call:1", []byte("a"), IndexValues{"traceId": "T", "status": 200})
-	db.PutIndexed("call:2", []byte("b"), IndexValues{"traceId": "T", "status": 201})
+	db.PutIndexed("call:1", []byte(`{"v":"a"}`), IndexValues{"traceId": "T", "status": 200})
+	db.PutIndexed("call:2", []byte(`{"v":"b"}`), IndexValues{"traceId": "T", "status": 201})
 	// Third record for the same value: the lowest pk (call:1) is evicted.
-	db.PutIndexed("call:3", []byte("c"), IndexValues{"traceId": "T", "status": 202})
+	db.PutIndexed("call:3", []byte(`{"v":"c"}`), IndexValues{"traceId": "T", "status": 202})
 
 	if db.Has("call:1") {
 		t.Error("call:1 should be fully deleted after exceeding the cap")
@@ -284,7 +284,7 @@ func TestMaxPerValueEvictsOldest(t *testing.T) {
 	}
 
 	// A fourth record rolls the window again.
-	db.PutIndexed("call:4", []byte("d"), IndexValues{"traceId": "T", "status": 203})
+	db.PutIndexed("call:4", []byte(`{"v":"d"}`), IndexValues{"traceId": "T", "status": 203})
 	if got := mustBy(t, db, "traceId", "T"); !eqStrs(got, []string{"call:3", "call:4"}) {
 		t.Errorf("traceId T = %v, want [call:3 call:4]", got)
 	}
@@ -295,15 +295,15 @@ func TestMaxPerValueScopedPerValueAndOverwrite(t *testing.T) {
 	defer db.Close()
 
 	// Distinct values each get their own budget — no cross-value eviction.
-	db.PutIndexed("a:1", []byte("x"), IndexValues{"traceId": "A"})
-	db.PutIndexed("a:2", []byte("x"), IndexValues{"traceId": "A"})
-	db.PutIndexed("b:1", []byte("x"), IndexValues{"traceId": "B"})
+	db.PutIndexed("a:1", []byte(`{"v":"x"}`), IndexValues{"traceId": "A"})
+	db.PutIndexed("a:2", []byte(`{"v":"x"}`), IndexValues{"traceId": "A"})
+	db.PutIndexed("b:1", []byte(`{"v":"x"}`), IndexValues{"traceId": "B"})
 	if got := mustBy(t, db, "traceId", "A"); !eqStrs(got, []string{"a:1", "a:2"}) {
 		t.Errorf("traceId A = %v", got)
 	}
 
 	// Overwriting an existing pk keeps the group at size 2 — nothing evicted.
-	db.PutIndexed("a:2", []byte("y"), IndexValues{"traceId": "A"})
+	db.PutIndexed("a:2", []byte(`{"v":"y"}`), IndexValues{"traceId": "A"})
 	if got := mustBy(t, db, "traceId", "A"); !eqStrs(got, []string{"a:1", "a:2"}) {
 		t.Errorf("after overwrite traceId A = %v, want [a:1 a:2]", got)
 	}
@@ -316,7 +316,7 @@ func TestMaxPerValueUnlimitedByDefault(t *testing.T) {
 	db := openIndexed(t, t.TempDir()) // no MaxPerValue set anywhere
 	defer db.Close()
 	for i := 1; i <= 6; i++ {
-		db.PutIndexed(fmt.Sprintf("call:%d", i), []byte("x"), IndexValues{"traceId": "T"})
+		db.PutIndexed(fmt.Sprintf("call:%d", i), []byte(`{"v":"x"}`), IndexValues{"traceId": "T"})
 	}
 	if got := mustBy(t, db, "traceId", "T"); len(got) != 6 {
 		t.Errorf("unlimited index kept %d records, want 6", len(got))
@@ -326,10 +326,10 @@ func TestMaxPerValueUnlimitedByDefault(t *testing.T) {
 func TestMaxPerValueDurableAndSelfHealing(t *testing.T) {
 	dir := t.TempDir()
 	db := openCapped(t, dir, 3)
-	db.PutIndexed("call:1", []byte("x"), IndexValues{"traceId": "T"})
-	db.PutIndexed("call:2", []byte("x"), IndexValues{"traceId": "T"})
-	db.PutIndexed("call:3", []byte("x"), IndexValues{"traceId": "T"})
-	db.PutIndexed("call:4", []byte("x"), IndexValues{"traceId": "T"}) // evicts call:1
+	db.PutIndexed("call:1", []byte(`{"v":"x"}`), IndexValues{"traceId": "T"})
+	db.PutIndexed("call:2", []byte(`{"v":"x"}`), IndexValues{"traceId": "T"})
+	db.PutIndexed("call:3", []byte(`{"v":"x"}`), IndexValues{"traceId": "T"})
+	db.PutIndexed("call:4", []byte(`{"v":"x"}`), IndexValues{"traceId": "T"}) // evicts call:1
 	db.Close()
 
 	// Reopen with the SAME cap: the eviction survived (tombstone + hint).
@@ -349,7 +349,7 @@ func TestMaxPerValueDurableAndSelfHealing(t *testing.T) {
 	if got := mustBy(t, db3, "traceId", "T"); len(got) != 3 {
 		t.Fatalf("boot state = %v, want the 3 pre-existing records (no boot sweep)", got)
 	}
-	db3.PutIndexed("call:5", []byte("x"), IndexValues{"traceId": "T"})
+	db3.PutIndexed("call:5", []byte(`{"v":"x"}`), IndexValues{"traceId": "T"})
 	if got := mustBy(t, db3, "traceId", "T"); !eqStrs(got, []string{"call:5"}) {
 		t.Errorf("after cap-lowered write traceId T = %v, want [call:5]", got)
 	}
@@ -358,8 +358,8 @@ func TestMaxPerValueDurableAndSelfHealing(t *testing.T) {
 func TestSecondaryRebuildAfterReopen(t *testing.T) {
 	dir := t.TempDir()
 	db := openIndexed(t, dir)
-	db.PutIndexed("call:1", []byte("a"), IndexValues{"traceId": "T1", "status": 200})
-	db.PutIndexed("call:2", []byte("b"), IndexValues{"traceId": "T1", "status": 500})
+	db.PutIndexed("call:1", []byte(`{"v":"a"}`), IndexValues{"traceId": "T1", "status": 200})
+	db.PutIndexed("call:2", []byte(`{"v":"b"}`), IndexValues{"traceId": "T1", "status": 500})
 	db.Close()
 
 	// Reopen: secondary indexes must be rebuilt from the persisted ix fields,
@@ -378,9 +378,9 @@ func TestSecondaryCompactionPreserves(t *testing.T) {
 	db := openIndexed(t, t.TempDir())
 	defer db.Close()
 
-	db.PutIndexed("call:1", []byte("a"), IndexValues{"traceId": "T1"})
-	db.PutIndexed("call:1", []byte("a2"), IndexValues{"traceId": "T1"}) // dead record
-	db.PutIndexed("call:2", []byte("b"), IndexValues{"traceId": "T1"})
+	db.PutIndexed("call:1", []byte(`{"v":"a"}`), IndexValues{"traceId": "T1"})
+	db.PutIndexed("call:1", []byte(`{"v":"a2"}`), IndexValues{"traceId": "T1"}) // dead record
+	db.PutIndexed("call:2", []byte(`{"v":"b"}`), IndexValues{"traceId": "T1"})
 
 	if err := db.Compact(); err != nil {
 		t.Fatal(err)
@@ -437,11 +437,11 @@ func TestSecondaryErrors(t *testing.T) {
 	defer db.Close()
 
 	// Unknown index name.
-	if err := db.PutIndexed("k", []byte("v"), IndexValues{"nope": "x"}); err == nil {
+	if err := db.PutIndexed("k", []byte(`{"v":"v"}`), IndexValues{"nope": "x"}); err == nil {
 		t.Error("expected error for unknown index")
 	}
 	// Wrong value kind (string into number index).
-	if err := db.PutIndexed("k", []byte("v"), IndexValues{"status": "not-a-number"}); err == nil {
+	if err := db.PutIndexed("k", []byte(`{"v":"v"}`), IndexValues{"status": "not-a-number"}); err == nil {
 		t.Error("expected error for wrong value kind")
 	}
 	// A failed PutIndexed must not have written anything.
@@ -461,5 +461,87 @@ func TestSecondaryDuplicateNameRejected(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error for duplicate index name")
+	}
+}
+
+// Only JSON-object values may carry secondary index entries. Immediate values
+// (strings, numbers, booleans, arrays, binary) are primary-key-only: Extract
+// functions never run over them, and explicit index values are rejected.
+func TestImmediateValuesArePKOnly(t *testing.T) {
+	db, err := Open(Options{Dir: t.TempDir(), Indexes: []IndexDef{
+		{Name: "traceId", Kind: KindString},
+		{Name: "firstByte", Kind: KindString, Extract: func(key string, value []byte) (any, bool) {
+			if len(value) == 0 {
+				return nil, false
+			}
+			return string(value[:1]), true // permissive: would index ANY value shape
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Extract never runs over immediate values...
+	immediates := map[string][]byte{
+		"str":   []byte("hello"),
+		"num":   []byte("42"),
+		"float": []byte("1.5"),
+		"bool":  []byte("true"),
+		"arr":   []byte(`[1,2,3]`),
+		"bin":   {0xff, 0xfe, 0x00},
+	}
+	for key, val := range immediates {
+		if err := db.Put(key, val); err != nil {
+			t.Fatalf("put %q: %v", key, err)
+		}
+	}
+	for _, val := range []string{"h", "4", "1", "t", "[", "\xff"} {
+		if keys := mustBy(t, db, "firstByte", val); len(keys) != 0 {
+			t.Errorf("immediate value indexed by Extract at %q: %v", val, keys)
+		}
+	}
+	// ...but does run over object values.
+	if err := db.Put("doc", []byte(`{"kind":"x"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if keys := mustBy(t, db, "firstByte", "{"); !eqStrs(keys, []string{"doc"}) {
+		t.Errorf("object record not indexed: %v", keys)
+	}
+	// Leading whitespace does not hide an object from the shape check (the
+	// extractor still sees the raw bytes, so it derives the space byte here).
+	if err := db.Put("padded", []byte(`  {"kind":"y"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if keys := mustBy(t, db, "firstByte", " "); !eqStrs(keys, []string{"padded"}) {
+		t.Errorf("whitespace-prefixed object skipped by Extract: %v", keys)
+	}
+
+	// Explicit index values on an immediate value are rejected, nothing written.
+	if err := db.PutIndexed("k", []byte("scalar"), IndexValues{"traceId": "T"}); err == nil {
+		t.Fatal("expected error: explicit index values on an immediate value")
+	}
+	if db.Has("k") {
+		t.Error("k must not exist after rejected PutIndexed")
+	}
+
+	// A batch containing one offending item writes nothing.
+	err = db.PutBatch([]PutItem{
+		{Key: "ok", Value: []byte(`{"a":1}`), IX: IndexValues{"traceId": "T"}},
+		{Key: "bad", Value: []byte("scalar"), IX: IndexValues{"traceId": "T"}},
+	})
+	if err == nil {
+		t.Fatal("expected batch rejection")
+	}
+	if db.Has("ok") || db.Has("bad") {
+		t.Error("rejected batch must write nothing")
+	}
+
+	// Explicit values on an object value still work (the feature is intact).
+	if err := db.PutIndexed("call:1", []byte(`{"a":1}`), IndexValues{"traceId": "T"}); err != nil {
+		t.Fatal(err)
+	}
+	if keys := mustBy(t, db, "traceId", "T"); !eqStrs(keys, []string{"call:1"}) {
+		t.Errorf("traceId T = %v, want [call:1]", keys)
 	}
 }

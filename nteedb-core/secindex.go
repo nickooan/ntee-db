@@ -34,6 +34,10 @@ type IndexValues = map[string]any
 // derived/supplied value is persisted in the record so the index can be rebuilt
 // at boot without re-reading values.
 //
+// Indexes cover JSON-object values only: Extract is never executed over an
+// immediate value (string, number, boolean, array, binary), and PutIndexed
+// rejects explicit values for one. Immediate values are primary-key-only.
+//
 // MaxPerValue, when > 0, caps how many records may share one value in this
 // index. A write that pushes a value's group over the cap evicts the oldest
 // record(s) — lowest primary key within the group — as a full, durable delete
@@ -368,7 +372,7 @@ func (db *DB) writeLocked(key string, value []byte, explicit IndexValues) error 
 	if err := db.checkSelfEvictionLocked(key, ix); err != nil {
 		return err
 	}
-	if err := db.appendRecordLocked(key, value, ix, db.opts.SyncEveryWrite); err != nil {
+	if err := db.appendRecordLocked(key, value, ix, db.opts.SyncEveryWrite, false); err != nil {
 		return err
 	}
 	if err := db.enforceMaxPerValueLocked(ix); err != nil {
@@ -379,12 +383,14 @@ func (db *DB) writeLocked(key string, value []byte, explicit IndexValues) error 
 	return nil
 }
 
-// appendRecordLocked is the per-record write core shared by Put and PutBatch:
-// blob offload, main-log append, and primary/secondary index updates. durable
-// controls the per-write fsyncs — batch writers pass false and issue a single
-// flush at the end of the batch. Callers must hold db.mu and have validated ix
-// via buildIndexValues.
-func (db *DB) appendRecordLocked(key string, value []byte, ix map[string]any, durable bool) error {
+// appendRecordLocked is the per-record write core shared by Put, PutBatch and
+// Incr: blob offload, main-log append, and primary/secondary index updates.
+// durable controls the per-write fsyncs — batch writers pass false and issue a
+// single flush at the end of the batch. counter marks the record as an int64
+// counter (see Incr); counter records are never blob-offloaded, whatever the
+// configured threshold — in-place increments need the value inline in the main
+// log. Callers must hold db.mu and have validated ix via buildIndexValues.
+func (db *DB) appendRecordLocked(key string, value []byte, ix map[string]any, durable, counter bool) error {
 	// Large values go to the blob side file; the main record just references
 	// them. The blob is fsynced before the referencing main record is appended —
 	// on EVERY path, not just durable mode: the two live in different files, so
@@ -392,8 +398,8 @@ func (db *DB) appendRecordLocked(key string, value []byte, ix map[string]any, du
 	// blob bytes are still in the page cache, leaving a reference past the end
 	// of blobs.dat. With it, a crash can only ever orphan a blob. Blobs are rare
 	// (values >= BlobThreshold), so the extra fsync on the fast path is cheap.
-	rec := record{Key: key, Value: value, IX: ix}
-	if db.useBlobFor(len(value)) {
+	rec := record{Key: key, Value: value, IX: ix, Counter: counter}
+	if !counter && db.useBlobFor(len(value)) {
 		bs := db.curBlobs()
 		ref, err := bs.append(value)
 		if err != nil {
@@ -516,12 +522,37 @@ func (si *secIndex) wouldSelfEvict(val any, key string) (bool, error) {
 	return key <= si.at(lo+excess-1).pk, nil
 }
 
+// isObjectValue reports whether value is shaped like a JSON object — leading
+// JSON whitespace then '{'. A cheap shape sniff, not full validation: only
+// object records may carry secondary index entries (see buildIndexValues).
+func isObjectValue(value []byte) bool {
+	for _, c := range value {
+		switch c {
+		case ' ', '\t', '\r', '\n':
+			continue
+		}
+		return c == '{'
+	}
+	return false
+}
+
 // buildIndexValues merges explicit values with values derived from index
 // Extract functions, validating each against its index's kind. It returns nil
 // when there are no secondary index values for this record.
+//
+// Only JSON-object values may carry index entries: immediate values (strings,
+// numbers, booleans, arrays, binary) are plain key:value pairs addressed by
+// primary key alone — explicit values for them are an error, and Extract
+// functions are never executed over them.
 func (db *DB) buildIndexValues(key string, value []byte, explicit IndexValues) (map[string]any, error) {
 	if len(db.secIndexes) == 0 && len(explicit) == 0 {
 		return nil, nil
+	}
+	if !isObjectValue(value) {
+		if len(explicit) > 0 {
+			return nil, fmt.Errorf("nteedb: secondary index values require a JSON object value; key %q holds an immediate value (primary-key access only)", key)
+		}
+		return nil, nil // immediate value: never run Extract
 	}
 	out := make(map[string]any)
 	for name, val := range explicit {

@@ -11,9 +11,9 @@ func TestPutBatchOrderAndQueries(t *testing.T) {
 	defer db.Close()
 
 	err := db.PutBatch([]PutItem{
-		{Key: "call:1", Value: []byte("a"), IX: IndexValues{"traceId": "T1", "status": 200}},
-		{Key: "call:2", Value: []byte("b"), IX: IndexValues{"traceId": "T1", "status": 404}},
-		{Key: "call:3", Value: []byte("c"), IX: IndexValues{"traceId": "T2"}},
+		{Key: "call:1", Value: []byte(`{"v":"a"}`), IX: IndexValues{"traceId": "T1", "status": 200}},
+		{Key: "call:2", Value: []byte(`{"v":"b"}`), IX: IndexValues{"traceId": "T1", "status": 404}},
+		{Key: "call:3", Value: []byte(`{"v":"c"}`), IX: IndexValues{"traceId": "T2"}},
 		{Key: "call:1", Value: []byte("a2")}, // same key later in the batch wins
 	})
 	if err != nil {
@@ -38,7 +38,7 @@ func TestPutBatchValidationWritesNothing(t *testing.T) {
 
 	err := db.PutBatch([]PutItem{
 		{Key: "ok:1", Value: []byte("v")},
-		{Key: "bad:1", Value: []byte("v"), IX: IndexValues{"status": "not-a-number"}},
+		{Key: "bad:1", Value: []byte(`{}`), IX: IndexValues{"status": "not-a-number"}},
 	})
 	if err == nil {
 		t.Fatal("expected validation error")
@@ -56,7 +56,7 @@ func TestPutBatchMaxPerValueAndDurability(t *testing.T) {
 	for i := range items {
 		items[i] = PutItem{
 			Key:   fmt.Sprintf("call:%d", i+1),
-			Value: []byte("v"),
+			Value: []byte(`{"v":"v"}`),
 			IX:    IndexValues{"traceId": "T"},
 		}
 	}
