@@ -48,7 +48,7 @@ func (db *DB) PutBatch(items []PutItem) error {
 
 	// Pass 2 — append in order, without per-write fsyncs.
 	for i, it := range items {
-		if err := db.appendRecordLocked(it.Key, it.Value, ixs[i], false); err != nil {
+		if err := db.appendRecordLocked(it.Key, it.Value, ixs[i], false, false); err != nil {
 			return fmt.Errorf("nteedb: batch item %d (%q): %w", i, it.Key, err)
 		}
 	}

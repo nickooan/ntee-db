@@ -222,6 +222,31 @@ n, err = db.RemoveByPkGreater("api:0000000000000456") // delete every key > cuto
 db.Compact()
 ```
 
+### Counters
+
+`Incr` provides atomic int64 counters (decrement = negative delta):
+
+```go
+v, err := db.Incr("hits", 1)  // missing key initializes to 0 first → v == 1
+v, err = db.Incr("hits", -5)  // v == -4
+v, err = db.Incr("hits", 0)   // read without changing
+```
+
+Counters are int64-only, stored as a fixed-width value (explicit sign + 19
+zero-padded digits — every int64 has exactly one such form). That fixed width
+is what lets an increment overwrite the digits **in place** at the same file
+offset: no log growth, no compaction pressure, and torn-write safe (a crash
+mid-write can only mix old/new digit characters, never corrupt the line).
+When an `Extract`-based index is declared, increments fall back to normal
+appends so index derivation stays correct.
+
+Counters are a distinct value type: `Incr` on a key holding any other value
+returns `ErrNotCounter`, a `Put` on a counter key demotes it to a plain value,
+and exceeding the int64 range returns `ErrCounterOverflow` with the value
+unchanged. Fractional counting is deliberately unsupported (floats have no
+bounded canonical text form) — store scaled integers instead (cents, not
+dollars).
+
 ### Options
 
 | Field            | Meaning                                                                                                                                                                                                                                                                                                                                                     |

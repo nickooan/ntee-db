@@ -368,7 +368,7 @@ func (db *DB) writeLocked(key string, value []byte, explicit IndexValues) error 
 	if err := db.checkSelfEvictionLocked(key, ix); err != nil {
 		return err
 	}
-	if err := db.appendRecordLocked(key, value, ix, db.opts.SyncEveryWrite); err != nil {
+	if err := db.appendRecordLocked(key, value, ix, db.opts.SyncEveryWrite, false); err != nil {
 		return err
 	}
 	if err := db.enforceMaxPerValueLocked(ix); err != nil {
@@ -379,12 +379,14 @@ func (db *DB) writeLocked(key string, value []byte, explicit IndexValues) error 
 	return nil
 }
 
-// appendRecordLocked is the per-record write core shared by Put and PutBatch:
-// blob offload, main-log append, and primary/secondary index updates. durable
-// controls the per-write fsyncs — batch writers pass false and issue a single
-// flush at the end of the batch. Callers must hold db.mu and have validated ix
-// via buildIndexValues.
-func (db *DB) appendRecordLocked(key string, value []byte, ix map[string]any, durable bool) error {
+// appendRecordLocked is the per-record write core shared by Put, PutBatch and
+// Incr: blob offload, main-log append, and primary/secondary index updates.
+// durable controls the per-write fsyncs — batch writers pass false and issue a
+// single flush at the end of the batch. counter marks the record as an int64
+// counter (see Incr); counter records are never blob-offloaded, whatever the
+// configured threshold — in-place increments need the value inline in the main
+// log. Callers must hold db.mu and have validated ix via buildIndexValues.
+func (db *DB) appendRecordLocked(key string, value []byte, ix map[string]any, durable, counter bool) error {
 	// Large values go to the blob side file; the main record just references
 	// them. The blob is fsynced before the referencing main record is appended —
 	// on EVERY path, not just durable mode: the two live in different files, so
@@ -392,8 +394,8 @@ func (db *DB) appendRecordLocked(key string, value []byte, ix map[string]any, du
 	// blob bytes are still in the page cache, leaving a reference past the end
 	// of blobs.dat. With it, a crash can only ever orphan a blob. Blobs are rare
 	// (values >= BlobThreshold), so the extra fsync on the fast path is cheap.
-	rec := record{Key: key, Value: value, IX: ix}
-	if db.useBlobFor(len(value)) {
+	rec := record{Key: key, Value: value, IX: ix, Counter: counter}
+	if !counter && db.useBlobFor(len(value)) {
 		bs := db.curBlobs()
 		ref, err := bs.append(value)
 		if err != nil {

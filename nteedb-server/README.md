@@ -197,8 +197,20 @@ Values of `number`-kind indexes are parsed from the token (`ix status 200`).
 | `put <pk> <inline value…rest of line>` | Put | `true` — sugar for single-line values |
 | `putx <pk> <ixbytes> <nbytes>` + 2 blocks | PutIndexed | `true` — index-values JSON block, then value block |
 | `del <pk>` | Delete | `true` |
+| `incr <pk> [delta]` | Incr | new value as a JSON number (delta defaults to 1) |
+| `decr <pk> [delta]` | Incr | new value as a JSON number (delta defaults to 1) |
 | `rml <cutoff>` | RemoveByPkLess | count of deleted keys (`< cutoff`) |
 | `rmg <cutoff>` | RemoveByPkGreater | count of deleted keys (`> cutoff`) |
+
+Counters are **int64 only** — no floats, no other types. A missing key
+initializes to 0 before the delta applies, so `incr hits 0` reads a counter
+(creating it at 0 if absent). `incr`/`decr` on a key holding any non-counter
+value fails with `key holds a non-counter value`; pushing past the int64 range
+fails with `counter overflows int64` and leaves the value unchanged. A `put`
+on a counter key demotes it to a plain value. Counters are stored fixed-width
+(sign + 19 digits), so increments normally rewrite bytes in place instead of
+growing the log; plain `get` therefore returns the raw 20-char string rather
+than a number — prefer `incr <pk> 0` to read one.
 
 A full `putx` frame on the wire:
 

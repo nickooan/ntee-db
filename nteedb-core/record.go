@@ -37,8 +37,15 @@ type blobRef struct {
 // Acceptable for a best-effort store; compaction rewrites old "v" text records
 // into "s" form as a side effect of its read-transform-write pass.
 //
-// The JSON keys are kept short ("k","s","v","b","del") because every record is
-// written to disk; omitempty keeps small records compact.
+// Counter marks a record written by Incr: its value is the fixed-width
+// 20-byte form (sign + 19 zero-padded digits) of an int64, which lets Incr
+// overwrite the digits in place at a stable offset. The flag is explicit —
+// a user string that merely looks like the format is NOT a counter.
+// Version skew: binaries older than the "c" field see a plain 20-char string
+// value; their Compact would drop the flag (same posture as the "s" note).
+//
+// The JSON keys are kept short ("k","s","v","b","del","c") because every
+// record is written to disk; omitempty keeps small records compact.
 type record struct {
 	Key     string         `json:"k"`
 	Text    string         `json:"s,omitempty"` // inline value, valid UTF-8: readable string
@@ -46,6 +53,7 @@ type record struct {
 	Blob    *blobRef       `json:"b,omitempty"` // set when value is stored as a blob
 	Deleted bool           `json:"del,omitempty"`
 	IX      map[string]any `json:"ix,omitempty"` // secondary index values for this key
+	Counter bool           `json:"c,omitempty"`  // value is a fixed-width int64 counter (see Incr)
 }
 
 // isTombstone reports whether the record deletes its key.

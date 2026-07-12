@@ -21,7 +21,7 @@ var rewriteRecordHook func()
 // resources are released since Close() would now be a no-op. Callers hold db.mu.
 func (db *DB) failStopLocked(cause error) error {
 	db.closed = true
-	db.main, db.rf = nil, nil
+	db.main, db.rf, db.rwf = nil, nil, nil
 	db.hintWG.Wait() // let any in-flight background hint writer finish first
 	for _, bs := range db.blobs {
 		_ = bs.close()
@@ -187,6 +187,7 @@ func (db *DB) rewriteBody(transform func(record) (record, error), br *blobRewrit
 	// confusing "file already closed" errors.
 	_ = db.main.close()
 	_ = db.rf.Close()
+	_ = db.rwf.Close()
 	if err := os.Rename(newMain, db.mainPath); err != nil {
 		return db.failStopLocked(err)
 	}
@@ -200,8 +201,15 @@ func (db *DB) rewriteBody(transform func(record) (record, error), br *blobRewrit
 		_ = lg.close()
 		return db.failStopLocked(err)
 	}
+	rwf, err := os.OpenFile(db.mainPath, os.O_RDWR, 0o644)
+	if err != nil {
+		_ = lg.close()
+		_ = rf.Close()
+		return db.failStopLocked(err)
+	}
 	db.main = lg
 	db.rf = rf
+	db.rwf = rwf
 	db.pk = newIdx
 	db.rebuildSecLocked()
 	db.writes = 0

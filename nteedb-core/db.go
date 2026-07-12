@@ -81,6 +81,7 @@ type DB struct {
 	lock   *os.File   // exclusive flock handle enforcing a single writer process
 	main   *mainLog   // append writer for main.jsonl (the main table)
 	rf     *os.File   // read handle for main.jsonl (ReadAt is concurrency-safe)
+	rwf    *os.File   // O_RDWR handle for in-place counter updates (see Incr)
 	blobs  map[int]*blobStore // blob side files by generation (see blobRef.Gen)
 	curGen int                // generation receiving new blob appends
 	pk     *pkIndex           // in-memory primary-key index
@@ -182,6 +183,14 @@ func Open(opts Options) (*DB, error) {
 		_ = lg.close()
 		return nil, err
 	}
+	// The main log's append handle is O_APPEND (writes forced to EOF), so Incr's
+	// in-place counter updates need this separate O_RDWR handle for WriteAt.
+	rwf, err := os.OpenFile(db.mainPath, os.O_RDWR, 0o644)
+	if err != nil {
+		_ = lg.close()
+		_ = rf.Close()
+		return nil, err
+	}
 	// Open every blob-file generation present (normally one; a crashed Relieve
 	// can leave a second). New appends target the highest generation — safe in
 	// every crash case, because generation files are only ever deleted by a
@@ -190,6 +199,7 @@ func Open(opts Options) (*DB, error) {
 	if err != nil {
 		_ = lg.close()
 		_ = rf.Close()
+		_ = rwf.Close()
 		return nil, err
 	}
 	cur := 0
@@ -210,12 +220,14 @@ func Open(opts Options) (*DB, error) {
 			}
 			_ = lg.close()
 			_ = rf.Close()
+			_ = rwf.Close()
 			return nil, err
 		}
 		blobs[g] = bs
 	}
 	db.main = lg
 	db.rf = rf
+	db.rwf = rwf
 	db.blobs = blobs
 	db.curGen = cur
 	opened = true
@@ -688,6 +700,11 @@ func (db *DB) Close() error {
 	}
 	if db.rf != nil {
 		if e := db.rf.Close(); e != nil && err == nil {
+			err = e
+		}
+	}
+	if db.rwf != nil {
+		if e := db.rwf.Close(); e != nil && err == nil {
 			err = e
 		}
 	}
