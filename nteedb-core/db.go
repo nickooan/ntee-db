@@ -232,7 +232,7 @@ func (db *DB) load() error {
 			for _, he := range entries {
 				db.pk.load(pkEntry{key: he.Key, off: he.Off, n: he.N, ix: he.IX})
 				if len(he.IX) > 0 {
-					db.insertSecLocked(he.Key, he.IX)
+					db.insertSec(he.Key, he.IX)
 				}
 			}
 			from = covers
@@ -269,11 +269,11 @@ func (db *DB) replayTail(from int64) error {
 		}
 		if r.isTombstone() {
 			// Retract first: the retraction reads ix off the primary entry.
-			db.retractSecLocked(r.Key)
+			db.retractSec(r.Key)
 			db.pk.remove(r.Key)
 		} else {
 			db.pk.upsert(pkEntry{key: r.Key, off: off, n: n})
-			db.refreshSecLocked(r.Key, r.IX)
+			db.refreshSec(r.Key, r.IX)
 		}
 		return nil
 	})
@@ -333,12 +333,16 @@ func (db *DB) adoptSchema() error {
 	return writeMeta(db.metaPath, out)
 }
 
-// writeHintLocked is the synchronous hint checkpoint (Close, Compact, range
+// writeHint is the synchronous hint checkpoint (Close, Compact, range
 // delete): it flushes the log so the watermark reflects durable data, then
 // atomically rewrites the hint. Bumping hintGen first invalidates any
 // in-flight async snapshot so a stale hint can never land after this fresh
-// one. Callers must hold db.mu.
-func (db *DB) writeHintLocked() error {
+// one.
+//
+// Locking: db.mu must already be held by the caller (the exported entry
+// points acquire it via lockWrite); this takes no store lock itself, only
+// briefly db.hintMu to serialize with the background hint writer.
+func (db *DB) writeHint() error {
 	db.hintGen.Add(1)
 	db.hintMu.Lock()
 	defer db.hintMu.Unlock()
@@ -363,7 +367,7 @@ func (db *DB) writeHintLocked() error {
 // hintSnapshot is a consistent view of everything the background hint writer
 // needs, taken under db.mu. pk is an O(1) copy-on-write clone of the primary
 // tree — safe to iterate lock-free while the live tree keeps mutating — and
-// the ix maps it references are never mutated in place (see refreshSecLocked).
+// the ix maps it references are never mutated in place (see refreshSec).
 type hintSnapshot struct {
 	pk     *pkIndex
 	covers int64
@@ -373,14 +377,16 @@ type hintSnapshot struct {
 	path   string
 }
 
-// maybeWriteHintLocked spawns a background hint rewrite once HintEveryN writes
+// maybeWriteHint spawns a background hint rewrite once HintEveryN writes
 // have accumulated, so the periodic hint never stalls the caller's Put with
 // fsyncs and a full index serialization. Single-flight: while one rewrite is
 // in flight, further triggers are skipped and the write counter keeps
 // accumulating until the next eligible write. The hint is a disposable
-// fast-boot optimization, so everything here is best-effort. Callers must
-// hold db.mu.
-func (db *DB) maybeWriteHintLocked() {
+// fast-boot optimization, so everything here is best-effort.
+//
+// Locking: acquires nothing itself — db.mu must already be held by the
+// caller (the exported entry points take it via lockWrite).
+func (db *DB) maybeWriteHint() {
 	if db.opts.HintEveryN <= 0 || db.writes < db.opts.HintEveryN {
 		return
 	}
@@ -450,7 +456,7 @@ func (db *DB) Put(key string, value []byte) error {
 	if db.closed {
 		return ErrClosed
 	}
-	return db.writeLocked(key, value, nil)
+	return db.write(key, value, nil)
 }
 
 // PutIndexed stores value under key with explicit secondary index values (e.g.
@@ -465,7 +471,7 @@ func (db *DB) PutIndexed(key string, value []byte, idx IndexValues) error {
 	if db.closed {
 		return ErrClosed
 	}
-	return db.writeLocked(key, value, idx)
+	return db.write(key, value, idx)
 }
 
 // Get returns the value stored under key. ok is false if the key is absent.
@@ -613,10 +619,10 @@ func (db *DB) Delete(key string) error {
 		return err
 	}
 	// Retract first: the retraction reads ix off the primary entry.
-	db.retractSecLocked(key)
+	db.retractSec(key)
 	db.pk.remove(key)
 	db.writes++
-	db.maybeWriteHintLocked()
+	db.maybeWriteHint()
 	return nil
 }
 
@@ -676,7 +682,7 @@ func (db *DB) Close() error {
 	var err error
 	if db.main != nil {
 		// Write a final hint so the next boot is fast (this also flushes the log).
-		if e := db.writeHintLocked(); e != nil {
+		if e := db.writeHint(); e != nil {
 			err = e
 		}
 	}

@@ -29,9 +29,13 @@ your app, in the same spirit as `lmdb` or SQLite in embedded mode.
   index budget (roughly key bytes + ~80 B of RAM per record). Degrades
   gracefully too — cold reads get slower instead of writes being refused.
 - **Atomic int64 counters** — `Incr`/`Decr` with Redis-style semantics
-  (missing key starts at 0, new value returned). Counters are stored
-  fixed-width and updated **in place**: a hot counter never grows the log and
-  never creates compaction debt.
+  (missing key starts at 0, new value returned), plus bounded `Topup`/`Take`
+  operators — `Topup` fills toward a max and returns how much didn't fit,
+  `Take` subtracts only if the result stays above a floor — with the bound
+  check and the update as one atomic operation, no read-then-write race.
+  Counters are stored fixed-width and updated
+  **in place**: a hot counter never grows the log and never creates
+  compaction debt.
 - **Single-writer safety** via kernel `flock` (releases on any process exit).
   Unix (macOS/Linux) only.
 - Pure Go; the only dependency is

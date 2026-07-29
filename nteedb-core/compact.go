@@ -10,12 +10,15 @@ import (
 // a test seam to observe (and pause) the gated rebuild phase.
 var rewriteRecordHook func()
 
-// failStopLocked permanently disables the store after an unrecoverable error
+// failStop permanently disables the store after an unrecoverable error
 // mid-compaction-swap: the old main handles are already closed and no usable
 // replacements exist. Marking the store closed makes every later call return
 // ErrClosed (instead of "file already closed" confusion), and the remaining
-// resources are released since Close() would now be a no-op. Callers hold db.mu.
-func (db *DB) failStopLocked(cause error) error {
+// resources are released since Close() would now be a no-op.
+//
+// Locking: acquires nothing itself — db.mu must already be held by the
+// caller (Compact holds it across the swap).
+func (db *DB) failStop(cause error) error {
 	db.closed = true
 	db.main, db.reader, db.patcher = nil, nil, nil
 	db.hintWG.Wait() // let any in-flight background hint writer finish first
@@ -178,23 +181,23 @@ func (db *DB) rewriteBody(transform func(record) (record, error), br *blobRewrit
 
 	// Swap: close old main handles, atomically replace the file, reopen. Past
 	// this point the old handles are gone — any failure below must fail-stop
-	// (see failStopLocked): limping on would leave db.main/db.reader pointing at
+	// (see failStop): limping on would leave db.main/db.reader pointing at
 	// closed files while db.closed stays false, wedging every later call with
 	// confusing "file already closed" errors.
 	_ = (mainHandles{log: db.main, reader: db.reader, patcher: db.patcher}).close()
 	if err := os.Rename(newMain, db.mainPath); err != nil {
-		return db.failStopLocked(err)
+		return db.failStop(err)
 	}
 
 	h, err := openMainHandles(db.mainPath, db.opts.SyncEveryWrite)
 	if err != nil {
-		return db.failStopLocked(err)
+		return db.failStop(err)
 	}
 	db.main = h.log
 	db.reader = h.reader
 	db.patcher = h.patcher
 	db.pk = newIdx
-	db.rebuildSecLocked()
+	db.rebuildSec()
 	db.writes = 0
 	if br != nil {
 		// Every live ref now points at the new generation: retire the others.
@@ -209,7 +212,7 @@ func (db *DB) rewriteBody(transform func(record) (record, error), br *blobRewrit
 		db.curGen = br.gen
 	}
 
-	return db.writeHintLocked()
+	return db.writeHint()
 }
 
 // BlobsRelieve rewrites every blob into a fresh generation file, dropping

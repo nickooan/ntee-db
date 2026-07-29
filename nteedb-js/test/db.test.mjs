@@ -506,6 +506,46 @@ test("incr/decr: atomic int64 counters", async () => {
   })
 })
 
+test("topup/take: guarded counters", async () => {
+  await withDB({}, async (db) => {
+    // 98 + 5 vs max 100: fills to 100, 3 units overflow.
+    await db.incr("c", 98)
+    assert.equal(await db.topup("c", 5, 100), 3)
+    assert.equal(await db.incr("c", 0), 100)
+    // At max: nothing added, the whole amount overflows.
+    assert.equal(await db.topup("c", 5, 100), 5)
+    // 90 + 10 == 100: exact fit, overflow 0.
+    await db.decr("c", 10)
+    assert.equal(await db.topup("c", 10, 100), 0)
+    assert.equal(await db.incr("c", 0), 100)
+    // Drain to 0, then refuse below left.
+    assert.equal(await db.take("c", 100, 0), true)
+    assert.equal(await db.take("c", 1, 0), false)
+    // 11 - 10 = 1 >= 0: applies, remainder 1.
+    await db.incr("c", 11)
+    assert.equal(await db.take("c", 10, 0), true)
+    assert.equal(await db.incr("c", 0), 1)
+
+    // Missing key counts as 0: a topup that adds creates it (clamped at max),
+    // a refused take doesn't.
+    assert.equal(await db.topup("fresh", 5, 10), 0)
+    assert.equal(await db.incr("fresh", 0), 5)
+    assert.equal(await db.topup("clamped", 20, 10), 10)
+    assert.equal(await db.incr("clamped", 0), 10)
+    assert.equal(await db.take("ghost", 1, 0), false)
+    assert.equal(await db.has("ghost"), false)
+
+    // Type and argument rules.
+    db.put("plain", "hello")
+    await assert.rejects(db.topup("plain", 1, 10), /non-counter/)
+    await assert.rejects(db.take("plain", 1, 0), /non-counter/)
+    await assert.rejects(db.topup("c", -1, 10), /non-negative/)
+    await assert.rejects(db.take("c", -1, 0), /non-negative/)
+    assert.throws(() => db.topup("c", 1.5, 10), TypeError)
+    assert.throws(() => db.take("c", 1, NaN), TypeError)
+  })
+})
+
 test("counters persist across close/reopen", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "nteedb-"))
   try {
@@ -610,6 +650,8 @@ test("operations on a closed handle throw", async () => {
       () => db.put("b", { n: 2 }),
       () => db.incr("c"),
       () => db.decr("c"),
+      () => db.topup("c", 1, 10),
+      () => db.take("c", 1, 0),
       () => db.stats(),
       () => db.prefixScan(""),
       () => db.drop(),

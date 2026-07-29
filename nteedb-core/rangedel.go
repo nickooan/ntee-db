@@ -26,7 +26,7 @@ func (db *DB) RemoveByPkLess(cutoff string) (int, error) {
 		doomed = append(doomed, e)
 		return true
 	})
-	return db.removePkEntriesLocked(doomed)
+	return db.removePkEntries(doomed)
 }
 
 // RemoveByPkGreater deletes every key strictly greater than cutoff (the cutoff
@@ -44,14 +44,16 @@ func (db *DB) RemoveByPkGreater(cutoff string) (int, error) {
 		}
 		return true
 	})
-	return db.removePkEntriesLocked(doomed)
+	return db.removePkEntries(doomed)
 }
 
-// removePkEntriesLocked removes the given primary entries (snapshotted by the
+// removePkEntries removes the given primary entries (snapshotted by the
 // caller — they must not alias live tree state), retracting their secondary
-// entries in one sweep per index and appending a tombstone per key. Callers
-// must hold db.mu.
-func (db *DB) removePkEntriesLocked(doomed []pkEntry) (int, error) {
+// entries in one sweep per index and appending a tombstone per key.
+//
+// Locking: acquires nothing itself — db.mu must already be held by the
+// caller (RemoveByPkLess/RemoveByPkGreater take it via lockWrite).
+func (db *DB) removePkEntries(doomed []pkEntry) (int, error) {
 	if len(doomed) == 0 {
 		return 0, nil
 	}
@@ -82,7 +84,7 @@ func (db *DB) removePkEntriesLocked(doomed []pkEntry) (int, error) {
 	// Force a hint rewrite so the trimmed state is the fast-boot snapshot and
 	// covers advances past the tombstones we just appended.
 	db.writes += len(doomed)
-	if err := db.writeHintLocked(); err != nil {
+	if err := db.writeHint(); err != nil {
 		return 0, err
 	}
 	return len(doomed), nil

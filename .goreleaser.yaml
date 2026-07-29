@@ -1,0 +1,69 @@
+# GoReleaser v2 — release automation for the nteedb-server binary (the native
+# server only; nteedb-js ships separately through npm).
+#
+# Triggered by the release workflow on every v* tag: cross-compiles from a
+# Linux runner (pure Go, CGO off), fuses the two mac architectures into one
+# universal binary, publishes archives + checksums to a GitHub Release, and
+# pushes a Homebrew cask to nickooan/homebrew-tap (authenticated by the
+# TAP_GITHUB_TOKEN Actions secret).
+version: 2
+
+project_name: nteedb-server
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - main: ./nteedb-server
+    binary: nteedb-server
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{ .Version }}
+
+# One fat mac binary instead of separate Intel/Apple Silicon downloads.
+universal_binaries:
+  - replace: true
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs"
+      - "^test"
+      - "^chore"
+
+homebrew_casks:
+  - name: nteedb-server
+    repository:
+      owner: nickooan
+      name: homebrew-tap
+      # A PAT with Contents read/write on homebrew-tap (the TAP_GITHUB_TOKEN
+      # Actions secret). The release fails here if it is missing or expired.
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/nickooan/ntee-db
+    description: Native ntee-db server with a memcached-style text protocol
+    # The binary is unsigned (no Apple Developer membership): strip the
+    # quarantine flag Homebrew Cask applies on download, so Gatekeeper
+    # doesn't block the first launch.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/nteedb-server"]
+          end

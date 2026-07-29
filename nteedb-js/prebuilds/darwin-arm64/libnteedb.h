@@ -103,6 +103,17 @@ extern char* nteedb_put(unsigned int h, char* key, unsigned char* val, int valLe
 // a negated delta.
 //
 extern char* nteedb_incr(unsigned int h, char* key, long long delta);
+
+// nteedb_topup atomically adds up to amount (>= 0) to the counter at key,
+// clamped at max, returning how much of amount did not fit (0 = fully
+// applied).
+//
+extern char* nteedb_topup(unsigned int h, char* key, long long amount, long long max);
+
+// nteedb_take atomically subtracts amount (>= 0) from the counter at key only
+// if the result stays >= left, returning whether it applied.
+//
+extern char* nteedb_take(unsigned int h, char* key, long long amount, long long left);
 extern char* nteedb_get_json(unsigned int h, char* key);
 extern char* nteedb_get_many_json(unsigned int h, char* keysJSON);
 extern char* nteedb_has(unsigned int h, char* key);

@@ -42,7 +42,7 @@ func (ix *pkIndex) get(key string) (pkEntry, bool) {
 }
 
 // upsert inserts e, or updates an existing key's record location in place,
-// preserving the entry's current ix (which only refreshSecLocked rewrites).
+// preserving the entry's current ix (which only refreshSec rewrites).
 func (ix *pkIndex) upsert(e pkEntry) {
 	if prev, ok := ix.tree.Get(e); ok {
 		e.ix = prev.ix

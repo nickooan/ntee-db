@@ -256,6 +256,32 @@ unchanged. Fractional counting is deliberately unsupported (floats have no
 bounded canonical text form) — store scaled integers instead (cents, not
 dollars).
 
+`Topup` and `Take` are bounded counter updates for quota/stock patterns —
+the bound check and the update are one atomic operation, so concurrent
+callers can never overshoot:
+
+```go
+over, err := db.Topup("quota", 10, 100) // fill toward 100; over = amount that didn't fit
+ok, err := db.Take("stock", 10, 0)      // subtract 10 only if result >= 0
+```
+
+`Topup` adds as much of the amount as fits under max — at 98, `Topup(k, 5,
+100)` fills to 100 and returns 3 — so the return value is the overflow: 0
+means the full amount applied, a positive value means the counter is at max
+(a counter already at or above max is left unchanged and the whole amount
+comes back), and any error returns -1 (never 0) alongside the error itself,
+so the number alone distinguishes error, fully applied, and clamped. `Take`
+is all-or-nothing: it subtracts only if the result stays `>= left` and
+reports whether it applied.
+
+The amount must be non-negative for both (`ErrNegativeAmount` otherwise) —
+the bound gives each its direction. A missing key counts as 0: a `Topup`
+that adds anything creates it (clamped at max), and an operation that
+changes nothing writes nothing — no key created, no log growth. Arithmetic
+that would leave the int64 range never errors: `Topup` just clamps at max,
+and a `Take` difference past `MinInt64` is below every left bound, so it
+refuses.
+
 ### Options
 
 | Field            | Meaning                                                                                                                                                                                                                                                                                                                                                     |

@@ -362,35 +362,42 @@ func (si *secIndex) rangeQuery(lo, hi any) ([]string, error) {
 
 // --- DB integration: write path, retraction, and query API ---
 
-// writeLocked appends a record for key and updates the primary and secondary
-// indexes. It handles blob offloading for large values. Callers must hold db.mu.
-func (db *DB) writeLocked(key string, value []byte, explicit IndexValues) error {
+// write appends a record for key and updates the primary and secondary
+// indexes. It handles blob offloading for large values.
+//
+// Locking: acquires nothing itself — db.mu must already be held by the
+// caller (Put/PutIndexed take it via lockWrite).
+func (db *DB) write(key string, value []byte, explicit IndexValues) error {
 	ix, err := db.buildIndexValues(key, value, explicit)
 	if err != nil {
 		return err
 	}
-	if err := db.checkSelfEvictionLocked(key, ix); err != nil {
+	if err := db.checkSelfEviction(key, ix); err != nil {
 		return err
 	}
-	if err := db.appendRecordLocked(key, value, ix, db.opts.SyncEveryWrite, false); err != nil {
+	if err := db.appendRecord(key, value, ix, db.opts.SyncEveryWrite, false); err != nil {
 		return err
 	}
-	if err := db.enforceMaxPerValueLocked(ix); err != nil {
+	if err := db.enforceMaxPerValue(ix); err != nil {
 		return err
 	}
 	db.writes++
-	db.maybeWriteHintLocked()
+	db.maybeWriteHint()
 	return nil
 }
 
-// appendRecordLocked is the per-record write core shared by Put, PutBatch and
+// appendRecord is the per-record write core shared by Put, PutBatch and
 // Incr: blob offload, main-log append, and primary/secondary index updates.
 // durable controls the per-write fsyncs — batch writers pass false and issue a
 // single flush at the end of the batch. counter marks the record as an int64
 // counter (see Incr); counter records are never blob-offloaded, whatever the
 // configured threshold — in-place increments need the value inline in the main
-// log. Callers must hold db.mu and have validated ix via buildIndexValues.
-func (db *DB) appendRecordLocked(key string, value []byte, ix map[string]any, durable, counter bool) error {
+// log.
+//
+// Locking: acquires nothing itself — db.mu must already be held by the
+// caller (the exported writers take it via lockWrite). Callers must also
+// have validated ix via buildIndexValues.
+func (db *DB) appendRecord(key string, value []byte, ix map[string]any, durable, counter bool) error {
 	// Large values go to the blob side file; the main record just references
 	// them. The blob is fsynced before the referencing main record is appended —
 	// on EVERY path, not just durable mode: the two live in different files, so
@@ -417,19 +424,22 @@ func (db *DB) appendRecordLocked(key string, value []byte, ix map[string]any, du
 		return err
 	}
 	db.pk.upsert(pkEntry{key: key, off: off, n: n})
-	db.refreshSecLocked(key, ix)
+	db.refreshSec(key, ix)
 	return nil
 }
 
-// enforceMaxPerValueLocked applies each capped index's MaxPerValue to the value
+// enforceMaxPerValue applies each capped index's MaxPerValue to the value
 // groups this write just touched: while a group holds more than max records,
 // the lowest-pk (oldest, when keys encode time) records are evicted as full,
 // durable deletes — tombstone first, then primary-index removal and retraction
-// from every secondary index, exactly like Delete. Callers must hold db.mu.
+// from every secondary index, exactly like Delete.
 //
 // An overwrite of an existing key never grows a group (its old entry is
 // retracted before the new one is inserted), so it cannot trigger eviction.
-func (db *DB) enforceMaxPerValueLocked(ix map[string]any) error {
+//
+// Locking: acquires nothing itself — db.mu must already be held by the
+// caller (the exported writers take it via lockWrite).
+func (db *DB) enforceMaxPerValue(ix map[string]any) error {
 	for name, val := range ix {
 		si := db.secIndexes[name]
 		if si == nil || si.max <= 0 {
@@ -457,7 +467,7 @@ func (db *DB) enforceMaxPerValueLocked(ix map[string]any) error {
 			}
 			// Retract BEFORE removing the primary entry — the retraction reads
 			// the victim's ix values off that entry.
-			db.retractSecLocked(pk)
+			db.retractSec(pk)
 			db.pk.remove(pk)
 			db.writes++
 		}
@@ -465,14 +475,17 @@ func (db *DB) enforceMaxPerValueLocked(ix map[string]any) error {
 	return nil
 }
 
-// checkSelfEvictionLocked rejects a write whose key would be immediately
+// checkSelfEviction rejects a write whose key would be immediately
 // evicted by a capped index: eviction keeps a group's highest primary keys, so
 // a NEW key that sorts at (or below) the group's eviction boundary would be
 // tombstoned by its own write — Put would report success while Get finds
 // nothing. Rejecting up front (before anything is appended) turns that silent
 // loss into an explicit error. Overwrites of a key already in the group never
-// grow it, so they are always allowed. Callers must hold db.mu.
-func (db *DB) checkSelfEvictionLocked(key string, ix map[string]any) error {
+// grow it, so they are always allowed.
+//
+// Locking: acquires nothing itself — db.mu must already be held by the
+// caller (the exported writers take it via lockWrite).
+func (db *DB) checkSelfEviction(key string, ix map[string]any) error {
 	for name, val := range ix {
 		si := db.secIndexes[name]
 		if si == nil || si.max <= 0 {
@@ -585,10 +598,13 @@ func (db *DB) buildIndexValues(key string, value []byte, explicit IndexValues) (
 	return out, nil
 }
 
-// insertSecLocked applies a key's index values to the secondary indexes. It is
+// insertSec applies a key's index values to the secondary indexes. It is
 // best-effort (skips unknown indexes / invalid values) so it is safe during
-// boot replay where the declared index set may differ. Callers must hold db.mu.
-func (db *DB) insertSecLocked(key string, ix map[string]any) {
+// boot replay where the declared index set may differ.
+//
+// Locking: acquires nothing itself — db.mu must already be held by the
+// caller (boot runs single-threaded; every other path holds the write lock).
+func (db *DB) insertSec(key string, ix map[string]any) {
 	for name, val := range ix {
 		si := db.secIndexes[name]
 		if si == nil {
@@ -600,25 +616,31 @@ func (db *DB) insertSecLocked(key string, ix map[string]any) {
 	}
 }
 
-// refreshSecLocked retracts a key's previous secondary entries, applies its new
+// refreshSec retracts a key's previous secondary entries, applies its new
 // ones, and records ix on the key's primary entry (the single home of "this
 // key's current index values"; there is no separate map). The stored ix map is
 // owned from here on and never mutated in place — every writer allocates a
 // fresh map — which is what lets the background hint writer iterate a COW
-// clone of the primary tree without copying the maps. Callers must hold db.mu.
-func (db *DB) refreshSecLocked(key string, ix map[string]any) {
-	db.retractSecLocked(key)
+// clone of the primary tree without copying the maps.
+//
+// Locking: acquires nothing itself — db.mu must already be held by the
+// caller (the exported writers take it via lockWrite).
+func (db *DB) refreshSec(key string, ix map[string]any) {
+	db.retractSec(key)
 	if len(ix) == 0 {
 		return
 	}
-	db.insertSecLocked(key, ix)
+	db.insertSec(key, ix)
 	db.pk.setIX(key, ix)
 }
 
-// retractSecLocked removes a key's current secondary entries (used on overwrite
+// retractSec removes a key's current secondary entries (used on overwrite
 // and delete). The values are read from the key's primary entry, so this MUST
-// run before pk.remove when a key is being deleted. Callers must hold db.mu.
-func (db *DB) retractSecLocked(key string) {
+// run before pk.remove when a key is being deleted.
+//
+// Locking: acquires nothing itself — db.mu must already be held by the
+// caller (the exported writers take it via lockWrite).
+func (db *DB) retractSec(key string) {
 	e, ok := db.pk.get(key)
 	if !ok || len(e.ix) == 0 {
 		return
@@ -635,15 +657,18 @@ func (db *DB) retractSecLocked(key string) {
 	db.pk.setIX(key, nil)
 }
 
-// rebuildSecLocked rebuilds all secondary indexes from the ix values carried on
+// rebuildSec rebuilds all secondary indexes from the ix values carried on
 // the primary entries (used after a rewrite/compaction/reindex, when db.pk has
-// been replaced wholesale). Callers must hold db.mu.
-func (db *DB) rebuildSecLocked() {
+// been replaced wholesale).
+//
+// Locking: acquires nothing itself — db.mu must already be held by the
+// caller (Compact/Reindex hold it across the swap).
+func (db *DB) rebuildSec() {
 	for _, si := range db.secIndexes {
 		si.tree.Clear()
 	}
 	db.pk.scan(func(e pkEntry) bool {
-		db.insertSecLocked(e.key, e.ix)
+		db.insertSec(e.key, e.ix)
 		return true
 	})
 }

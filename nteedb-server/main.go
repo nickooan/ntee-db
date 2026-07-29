@@ -23,6 +23,11 @@ import (
 	nteedb "github.com/nickooan/ntee-db/nteedb-core"
 )
 
+// Version is the release version, printed by -version. Release builds inject
+// the git tag via -ldflags "-X main.Version=…"; "dev" marks a plain
+// `go build` / `go install`.
+var Version = "dev"
+
 type cliOptions struct {
 	addr     string
 	schema   string
@@ -35,6 +40,7 @@ type cliOptions struct {
 
 func main() {
 	var o cliOptions
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.StringVar(&o.addr, "addr", "127.0.0.1:6740", "host:port to listen on")
 	flag.StringVar(&o.schema, "schema", "", "path to schema.json (required)")
 	flag.StringVar(&o.dir, "dir", "", "store directory (overrides schema's \"dir\")")
@@ -43,6 +49,11 @@ func main() {
 	flag.BoolVar(&o.insecure, "insecure", false, "allow binding a non-loopback address without auth")
 	flag.DurationVar(&o.idle, "idle", 5*time.Minute, "per-connection idle timeout (0 disables)")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("nteedb-server " + Version)
+		return
+	}
 
 	log.SetFlags(log.LstdFlags)
 	log.SetPrefix("nteedb-server: ")

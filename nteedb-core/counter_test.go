@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -368,6 +369,319 @@ func TestIncrConcurrent(t *testing.T) {
 	wg.Wait()
 	if v, err := db.Incr("c", 0); err != nil || v != goroutines*per {
 		t.Fatalf("final = %d,%v, want %d", v, err, goroutines*per)
+	}
+}
+
+func TestTopupTakeBasics(t *testing.T) {
+	db := mustOpen(t, t.TempDir())
+	defer db.Close()
+
+	if _, err := db.Incr("c", 98); err != nil {
+		t.Fatal(err)
+	}
+	// 98 + 5 vs max 100: fills to 100, 3 units overflow.
+	if over, err := db.Topup("c", 5, 100); err != nil || over != 3 {
+		t.Fatalf("topup 5 at 98 = %d,%v, want 3,nil", over, err)
+	}
+	if v, _ := db.Incr("c", 0); v != 100 {
+		t.Fatalf("value after partial topup = %d, want 100", v)
+	}
+	// Already at max: nothing added, the whole amount overflows.
+	if over, err := db.Topup("c", 5, 100); err != nil || over != 5 {
+		t.Fatalf("topup at max = %d,%v, want 5,nil", over, err)
+	}
+	if v, _ := db.Incr("c", 0); v != 100 {
+		t.Fatalf("value after refused topup = %d, want 100", v)
+	}
+	// 90 + 10 = 100 == max: exact fit, overflow 0.
+	if _, err := db.Incr("c", -10); err != nil {
+		t.Fatal(err)
+	}
+	if over, err := db.Topup("c", 10, 100); err != nil || over != 0 {
+		t.Fatalf("topup at 90 = %d,%v, want 0,nil", over, err)
+	}
+	if v, _ := db.Incr("c", 0); v != 100 {
+		t.Fatalf("value after topup = %d, want 100", v)
+	}
+	// Already above max: left unchanged (Topup only ever adds).
+	if _, err := db.Incr("c", 20); err != nil {
+		t.Fatal(err)
+	}
+	if over, err := db.Topup("c", 5, 100); err != nil || over != 5 {
+		t.Fatalf("topup above max = %d,%v, want 5,nil", over, err)
+	}
+	if v, _ := db.Incr("c", 0); v != 120 {
+		t.Fatalf("value above max changed: %d, want 120", v)
+	}
+	if _, err := db.Incr("c", -20); err != nil {
+		t.Fatal(err)
+	}
+	// 100 - 100 = 0 == left: boundary applies.
+	if ok, err := db.Take("c", 100, 0); err != nil || !ok {
+		t.Fatalf("take 100 at 100 = %v,%v, want true,nil", ok, err)
+	}
+	if v, _ := db.Incr("c", 0); v != 0 {
+		t.Fatalf("value after take = %d, want 0", v)
+	}
+	// 9 - 10 = -1 < 0: refused.
+	if _, err := db.Incr("c", 9); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := db.Take("c", 10, 0); err != nil || ok {
+		t.Fatalf("take 10 at 9 = %v,%v, want false,nil", ok, err)
+	}
+	if v, _ := db.Incr("c", 0); v != 9 {
+		t.Fatalf("value after refused take = %d, want 9", v)
+	}
+	// 11 - 10 = 1 >= 0: applies.
+	if _, err := db.Incr("c", 2); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := db.Take("c", 10, 0); err != nil || !ok {
+		t.Fatalf("take 10 at 11 = %v,%v, want true,nil", ok, err)
+	}
+	if v, _ := db.Incr("c", 0); v != 1 {
+		t.Fatalf("value after take = %d, want 1", v)
+	}
+}
+
+func TestTopupTakeMissingKey(t *testing.T) {
+	dir := t.TempDir()
+	db := mustOpen(t, dir)
+	defer db.Close()
+
+	// Topup on a missing key counts from 0 and creates it.
+	if over, err := db.Topup("new", 5, 10); err != nil || over != 0 {
+		t.Fatalf("topup missing = %d,%v, want 0,nil", over, err)
+	}
+	if v, _ := db.Incr("new", 0); v != 5 {
+		t.Fatalf("created value = %d, want 5", v)
+	}
+	// A missing key clamps against max too: created at max, rest overflows.
+	if over, err := db.Topup("clamped", 11, 10); err != nil || over != 1 {
+		t.Fatalf("clamped topup missing = %d,%v, want 1,nil", over, err)
+	}
+	if v, _ := db.Incr("clamped", 0); v != 10 {
+		t.Fatalf("clamped value = %d, want 10", v)
+	}
+	lines := len(readMainLines(t, dir))
+
+	// Ops that add or take nothing must not create keys or touch the log.
+	if over, err := db.Topup("miss", 5, 0); err != nil || over != 5 {
+		t.Fatalf("topup with max 0 missing = %d,%v, want 5,nil", over, err)
+	}
+	if over, err := db.Topup("miss2", 0, 10); err != nil || over != 0 {
+		t.Fatalf("zero topup missing = %d,%v, want 0,nil", over, err)
+	}
+	if ok, err := db.Take("miss3", 1, 0); err != nil || ok {
+		t.Fatalf("refused take missing = %v,%v, want false,nil", ok, err)
+	}
+	for _, key := range []string{"miss", "miss2", "miss3"} {
+		if db.Has(key) {
+			t.Errorf("no-op created key %q", key)
+		}
+	}
+	if got := len(readMainLines(t, dir)); got != lines {
+		t.Fatalf("no-op writes grew log: %d -> %d lines", lines, got)
+	}
+
+	// A zero take with left <= 0 applies and creates the counter at 0.
+	if ok, err := db.Take("zero", 0, 0); err != nil || !ok {
+		t.Fatalf("take 0,0 missing = %v,%v, want true,nil", ok, err)
+	}
+	if v, _ := db.Incr("zero", 0); v != 0 {
+		t.Fatalf("created value = %d, want 0", v)
+	}
+}
+
+func TestTopupTakeNegativeAmount(t *testing.T) {
+	db := mustOpen(t, t.TempDir())
+	defer db.Close()
+
+	if _, err := db.Incr("c", 5); err != nil {
+		t.Fatal(err)
+	}
+	if over, err := db.Topup("c", -1, 100); !errors.Is(err, ErrNegativeAmount) || over != -1 {
+		t.Fatalf("topup negative = %d,%v, want -1,ErrNegativeAmount", over, err)
+	}
+	if _, err := db.Take("c", -1, 0); !errors.Is(err, ErrNegativeAmount) {
+		t.Fatalf("take negative = %v, want ErrNegativeAmount", err)
+	}
+	if v, _ := db.Incr("c", 0); v != 5 {
+		t.Fatalf("value after rejected ops = %d, want 5", v)
+	}
+}
+
+func TestTopupTakeNotCounter(t *testing.T) {
+	db := mustOpen(t, t.TempDir())
+	defer db.Close()
+
+	if err := db.Put("s", []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if over, err := db.Topup("s", 1, 10); !errors.Is(err, ErrNotCounter) || over != -1 {
+		t.Fatalf("topup on string = %d,%v, want -1,ErrNotCounter", over, err)
+	}
+	if _, err := db.Take("s", 1, 0); !errors.Is(err, ErrNotCounter) {
+		t.Fatalf("take on string = %v, want ErrNotCounter", err)
+	}
+	if got, ok := mustGet(t, db, "s"); !ok || got != "hello" {
+		t.Fatalf("value changed after rejected ops: %q", got)
+	}
+}
+
+// Out-of-int64-range arithmetic never errors: topup clamps at max, take
+// refuses (a difference past MinInt64 is below every left bound).
+func TestTopupTakeExtremeRange(t *testing.T) {
+	db := mustOpen(t, t.TempDir())
+	defer db.Close()
+
+	if _, err := db.Incr("c", math.MaxInt64); err != nil {
+		t.Fatal(err)
+	}
+	if over, err := db.Topup("c", 1, math.MaxInt64); err != nil || over != 1 {
+		t.Fatalf("topup at MaxInt64 = %d,%v, want 1,nil", over, err)
+	}
+	if v, _ := db.Incr("c", 0); v != math.MaxInt64 {
+		t.Fatalf("value = %d, want MaxInt64", v)
+	}
+	// cur+amount would overflow int64: still a clean partial fill to max.
+	if _, err := db.Incr("e", math.MaxInt64-2); err != nil {
+		t.Fatal(err)
+	}
+	if over, err := db.Topup("e", 5, math.MaxInt64); err != nil || over != 3 {
+		t.Fatalf("overflowing topup = %d,%v, want 3,nil", over, err)
+	}
+	if v, _ := db.Incr("e", 0); v != math.MaxInt64 {
+		t.Fatalf("value = %d, want MaxInt64", v)
+	}
+
+	if _, err := db.Incr("d", math.MinInt64); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := db.Take("d", 1, math.MinInt64); err != nil || ok {
+		t.Fatalf("take at MinInt64 = %v,%v, want false,nil", ok, err)
+	}
+	if v, _ := db.Incr("d", 0); v != math.MinInt64 {
+		t.Fatalf("value = %d, want MinInt64", v)
+	}
+}
+
+func TestTopupInPlaceNoLogGrowth(t *testing.T) {
+	db := mustOpen(t, t.TempDir())
+	defer db.Close()
+
+	if _, err := db.Incr("c", 1); err != nil {
+		t.Fatal(err)
+	}
+	base := db.Stats().MainBytes
+	for i := 0; i < 100; i++ {
+		if over, err := db.Topup("c", 1, 1000); err != nil || over != 0 {
+			t.Fatalf("topup %d = %d,%v", i, over, err)
+		}
+		if ok, err := db.Take("c", 5000, 0); err != nil || ok {
+			t.Fatalf("refused take %d = %v,%v", i, ok, err)
+		}
+	}
+	if got := db.Stats().MainBytes; got != base {
+		t.Errorf("MainBytes grew %d -> %d; in-place path not taken", base, got)
+	}
+	if v, err := db.Incr("c", 0); err != nil || v != 101 {
+		t.Errorf("value = %d,%v, want 101", v, err)
+	}
+}
+
+func TestTopupPersistsAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	db := mustOpen(t, dir)
+	if over, err := db.Topup("c", 40, 100); err != nil || over != 0 {
+		t.Fatal(over, err)
+	}
+	if over, err := db.Topup("c", 60, 100); err != nil || over != 0 {
+		t.Fatal(over, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db = mustOpen(t, dir)
+	defer db.Close()
+	if v, err := db.Incr("c", 0); err != nil || v != 100 {
+		t.Fatalf("after reopen = %d,%v, want 100", v, err)
+	}
+	if ok, err := db.Take("c", 100, 0); err != nil || !ok {
+		t.Fatalf("take after reopen = %v,%v, want true,nil", ok, err)
+	}
+}
+
+// TestTakeConcurrentDrain races takers against a fixed stock: exactly stock
+// takes may succeed, and the counter must land on 0 with no interleaving lost.
+func TestTakeConcurrentDrain(t *testing.T) {
+	db := mustOpen(t, t.TempDir())
+	defer db.Close()
+
+	const stock = 100
+	if _, err := db.Incr("c", stock); err != nil {
+		t.Fatal(err)
+	}
+	const goroutines, per = 8, 200
+	var succeeded atomic.Int64
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < per; i++ {
+				ok, err := db.Take("c", 1, 0)
+				if err != nil {
+					t.Errorf("take: %v", err)
+					return
+				}
+				if ok {
+					succeeded.Add(1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if got := succeeded.Load(); got != stock {
+		t.Fatalf("successful takes = %d, want %d", got, stock)
+	}
+	if v, err := db.Incr("c", 0); err != nil || v != 0 {
+		t.Fatalf("final = %d,%v, want 0", v, err)
+	}
+}
+
+func TestTopupConcurrentFill(t *testing.T) {
+	db := mustOpen(t, t.TempDir())
+	defer db.Close()
+
+	const capacity = 100
+	const goroutines, per = 8, 200
+	var succeeded atomic.Int64
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < per; i++ {
+				over, err := db.Topup("c", 1, capacity)
+				if err != nil {
+					t.Errorf("topup: %v", err)
+					return
+				}
+				if over == 0 {
+					succeeded.Add(1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if got := succeeded.Load(); got != capacity {
+		t.Fatalf("successful topups = %d, want %d", got, capacity)
+	}
+	if v, err := db.Incr("c", 0); err != nil || v != capacity {
+		t.Fatalf("final = %d,%v, want %d", v, err, capacity)
 	}
 }
 
