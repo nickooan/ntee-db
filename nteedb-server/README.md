@@ -267,12 +267,16 @@ the TTL passes, `get`/`has`/`getm`/`scan` report the key missing (and a
 background reaper then deletes it durably); nothing scans for expired keys,
 and `compact`/`reindex` drop any leftovers as they rewrite. Semantics to
 know: a plain `put` **clears** an existing TTL (the write replaces the
-record wholesale); the counter commands apply their `ttlms` **only when the
-call creates the key** — a live counter keeps its original deadline, and an
-expired one restarts from 0 with the new ttl. That makes
-`incr window 1 60000` a complete fixed-window rate limiter: the first
-request arms a one-minute window, requests count within it, and the window
-restarts after it lapses. One caveat: secondary indexes are TTL-unaware, so
+record wholesale); the counter commands **never touch a live counter's TTL
+in either direction** — omitting `ttlms` does NOT clear it (unlike `put`),
+and passing it on a live counter is ignored (create-only; the deadline
+never slides under traffic). An **expired** counter is recreated fresh by
+the next op, and only then does `ttlms` decide: present → the new window is
+armed; absent → the recreated counter is **immortal**. So pass the ttl on
+every call for expiring windows: `incr window 1 60000` is a complete
+fixed-window rate limiter — the first request arms a one-minute window,
+requests count within it, and the window restarts after it lapses. One
+caveat: secondary indexes are TTL-unaware, so
 an expired key can appear in `ix`/`ixh`/`ixp`/`ixr` results until its
 cleanup runs — `ixrec` and `getm` already drop such keys from their results.
 

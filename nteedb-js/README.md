@@ -249,6 +249,23 @@ if (Buffer.isBuffer(v)) {
   amount must be non-negative. These require a native library built from a
   version that exports them — rebuild via `capi/build.sh` if loading a
   locally built library.
+- **TTL (lazy per-key expiry)**: every write takes an optional `ttlMs`;
+  without it a key is immortal. Once the TTL passes the key reads as
+  missing (`get` → null, `has` → false) and is deleted lazily in the
+  background; `compact()`/`reindex()` drop leftovers. The rules:
+  - `put` replaces the record wholesale, so its TTL state wins — `ttlMs`
+    arms/replaces the expiry, omitting it **clears** an existing one.
+  - Counter ops (`incr`/`decr`/`topup`/`take`) **never touch a live
+    counter's TTL in either direction**: omitting `ttlMs` does NOT clear it
+    (unlike `put`), and passing it on a live counter is ignored
+    (create-only — a window's deadline never slides under traffic).
+  - An **expired** counter is recreated fresh by the next op, and then the
+    `ttlMs` arg decides: with it the new window is armed; without it the
+    recreated counter is **immortal**. For expiring windows/buckets, pass
+    `ttlMs` on every call — `incr("rl:u1", 1, 60000)` is a complete
+    fixed-window rate limiter (no-op on live keys, re-arms lapsed ones).
+  - Secondary indexes are TTL-unaware: an expired key can linger in
+    `secIndex*` key results until cleanup; record fetches already drop it.
 - **Only JSON-object values can be indexed**: immediate values — strings,
   numbers, booleans, arrays, binary — are plain key:value pairs addressed by
   primary key alone. Supplying `ix` with one throws, and `jsonPath` extraction

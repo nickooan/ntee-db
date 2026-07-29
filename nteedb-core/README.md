@@ -302,13 +302,18 @@ nothing ever scans for expired keys, and `Compact`/`Reindex` drop leftovers
 as they rewrite.
 
 Semantics: a `Put` **without** a ttl clears any existing one (the write
-replaces the record wholesale, Redis SET style). Counter ops apply their
-ttl **only when the call creates the key** — a live counter keeps its
-original deadline (in-place patches preserve it), and an expired counter is
-deleted inline and restarts from 0 with the new ttl, which is exactly the
-fixed-window behavior: `Incr(w, 1, time.Minute)` arms the window on the
-first request and restarts at 1 after it lapses. A non-positive or repeated
-ttl argument returns `ErrInvalidTTL`.
+replaces the record wholesale, Redis SET style). Counter ops are different:
+they **never touch a live counter's TTL in either direction** — omitting
+the ttl does NOT clear it (unlike `Put`), and passing one on a live counter
+is ignored (create-only; a window's deadline never slides under traffic).
+An **expired** counter is deleted inline and recreated fresh by the next
+op, and only then does the ttl argument decide: with it the new window is
+armed, without it the recreated counter is **immortal**. So for expiring
+windows and buckets the idiom is to pass the ttl on every call —
+`Incr(w, 1, time.Minute)` is a complete fixed-window rate limiter: it arms
+the window on the first request, is a no-op on the deadline while the
+window lives, and restarts at 1 with a fresh window after it lapses. A
+non-positive or repeated ttl argument returns `ErrInvalidTTL`.
 
 Caveat: `ByIndex*` results can transiently include an expired key until its
 cleanup runs (`GetMany`-backed record queries already drop it); `Stats` and

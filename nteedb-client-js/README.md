@@ -181,13 +181,28 @@ Any write can carry a `ttlMs`. Expiry lives in the server's primary-key
 index and is enforced **lazily**: once the TTL passes, the key reads as
 missing everywhere (`get`/`has`/`getMany`/`prefixScan`) and a background
 reaper deletes it durably; leftovers are dropped by `compact`/`reindex`.
-Semantics: a `put` **without** a ttl clears an existing one (the write
-replaces the record); counter ttls apply **only when the call creates the
-key** — a live counter keeps its deadline and an expired one restarts from
-0 with the new ttl. Caveat: secondary indexes are TTL-unaware, so an
-expired key can linger in `secIndex`/`secIndexHas`/... key results until
-its cleanup runs — `secIndexRecords` and `getMany` already drop it. There
-is no remaining-TTL query; re-arm by rewriting with `put(..., ttlMs)`.
+
+The TTL rules, per operation:
+
+- **No write has a TTL unless you pass one** — keys are immortal by default.
+- **`put` replaces the record wholesale, so its TTL state wins**: with
+  `ttlMs` it arms/replaces the expiry; without, it **clears** an existing
+  one (Redis SET style).
+- **Counter ops (`incr`/`decr`/`topup`/`take`) never touch a live counter's
+  TTL — in either direction.** Omitting `ttlMs` does NOT clear it (unlike
+  `put`), and passing `ttlMs` on a live counter is ignored (create-only —
+  a window's deadline never slides because of traffic).
+- **An expired counter is recreated fresh by the next op — and then the
+  `ttlMs` arg decides.** With it, the new window/bucket is armed; without
+  it, the recreated counter is **immortal**. So for expiring windows and
+  buckets, the correct idiom is to pass `ttlMs` on **every** call
+  (`incr("rl:u1", 1, 60000)`, `topup("bucket", n, cap, ttl)`): it's a no-op
+  on live keys and does the right thing on lapsed ones.
+
+Caveat: secondary indexes are TTL-unaware, so an expired key can linger in
+`secIndex`/`secIndexHas`/... key results until its cleanup runs —
+`secIndexRecords` and `getMany` already drop it. There is no remaining-TTL
+query; re-arm by rewriting with `put(..., ttlMs)`.
 
 ## Notes / limitations
 
