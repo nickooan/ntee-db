@@ -207,27 +207,27 @@ if (Buffer.isBuffer(v)) {
 
 ## API
 
-| Method                                                        | Returns                                    | Notes                                                                            |
-| ------------------------------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------- |
-| `NteeDB.open(dir, opts?)`                                     | `NteeDB`                                   | creates if missing                                                               |
-| `NteeDB.destroy(dir)`                                         | `void`                                     | delete a store's files (no open handle)                                          |
-| `put(key, value, ix?)`                                        | `void`                                     | `value`: object\|string\|Buffer (object → JSON); `ix`: `{name: string\|number}`  |
-| `putMany(items)`                                              | `Promise<number>`                          | one batch off the event loop; in-order; all-or-nothing validation                |
-| `incr(key, delta?)` / `decr(key, delta?)`                     | `Promise<number>`                          | atomic int64 counter; delta defaults to 1; resolves to the new value; **async**  |
+| Method                                                        | Returns                                    | Notes                                                                                      |
+| ------------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `NteeDB.open(dir, opts?)`                                     | `NteeDB`                                   | creates if missing                                                                         |
+| `NteeDB.destroy(dir)`                                         | `void`                                     | delete a store's files (no open handle)                                                    |
+| `put(key, value, ix?)`                                        | `void`                                     | `value`: object\|string\|Buffer (object → JSON); `ix`: `{name: string\|number}`            |
+| `putMany(items)`                                              | `Promise<number>`                          | one batch off the event loop; in-order; all-or-nothing validation                          |
+| `incr(key, delta?)` / `decr(key, delta?)`                     | `Promise<number>`                          | atomic int64 counter; delta defaults to 1; resolves to the new value; **async**            |
 | `topup(key, amount, max)`                                     | `Promise<number>`                          | fill toward `max`; resolves to the overflow that didn't fit (0 = fully applied); **async** |
-| `take(key, amount, left)`                                     | `Promise<boolean>`                         | subtract only if the result stays ≥ `left`; true iff applied; **async**          |
-| `get(key)`                                                    | `Promise<value \| null>`                   | the stored JSON parsed (a Buffer for binary/non-JSON); **async** (off the loop)  |
-| `getMany(keys)`                                               | `Promise<(value\|null)[]>`                 | batched get, one crossing, aligned to `keys`; **async** (off the event loop)     |
-| `has(key)`                                                    | `Promise<boolean>`                         | **async** (off the loop)                                                         |
-| `delete(key)`                                                 | `void`                                     |                                                                                  |
-| `stats()`                                                     | `Promise<{records, mainBytes, blobBytes}>` | cheap in-memory counters (sizes include dead space until `compact()`); **async** |
-| `prefixScan(prefix)`                                          | `Promise<string[]>`                        | sorted keys; **async** — concurrent scans run in parallel (off the loop)         |
-| `secIndex / secIndexPrefix / secIndexRange`                   | `Promise<string[]>`                        | primary keys; **async** (off the loop)                                           |
-| `secIndexHas(name, val)`                                      | `Promise<boolean>`                         | any record has `val` in the index (no keys materialized); **async**              |
-| `secIndexRecords / secIndexPrefixRecords / prefixScanRecords` | `Promise<{key, value}[]>`                  | keys + parsed content; **async** (record fetch off the event loop)               |
-| `secIndexDropped / secIndexProspective`                       | `Promise<string[]>`                        | schema state; **async**                                                          |
-| `compact()` / `reindex()`                                     | `Promise<void>`                            | run off the event loop                                                           |
-| `close()` / `drop()`                                          | `void`                                     |                                                                                  |
+| `take(key, amount, left)`                                     | `Promise<boolean>`                         | subtract only if the result stays ≥ `left`; true iff applied; **async**                    |
+| `get(key)`                                                    | `Promise<value \| null>`                   | the stored JSON parsed (a Buffer for binary/non-JSON); **async** (off the loop)            |
+| `getMany(keys)`                                               | `Promise<(value\|null)[]>`                 | batched get, one crossing, aligned to `keys`; **async** (off the event loop)               |
+| `has(key)`                                                    | `Promise<boolean>`                         | **async** (off the loop)                                                                   |
+| `delete(key)`                                                 | `void`                                     |                                                                                            |
+| `stats()`                                                     | `Promise<{records, mainBytes, blobBytes}>` | cheap in-memory counters (sizes include dead space until `compact()`); **async**           |
+| `prefixScan(prefix)`                                          | `Promise<string[]>`                        | sorted keys; **async** — concurrent scans run in parallel (off the loop)                   |
+| `secIndex / secIndexPrefix / secIndexRange`                   | `Promise<string[]>`                        | primary keys; **async** (off the loop)                                                     |
+| `secIndexHas(name, val)`                                      | `Promise<boolean>`                         | any record has `val` in the index (no keys materialized); **async**                        |
+| `secIndexRecords / secIndexPrefixRecords / prefixScanRecords` | `Promise<{key, value}[]>`                  | keys + parsed content; **async** (record fetch off the event loop)                         |
+| `secIndexDropped / secIndexProspective`                       | `Promise<string[]>`                        | schema state; **async**                                                                    |
+| `compact()` / `reindex()`                                     | `Promise<void>`                            | run off the event loop                                                                     |
+| `close()` / `drop()`                                          | `void`                                     |                                                                                            |
 
 ## Notes / limitations
 
