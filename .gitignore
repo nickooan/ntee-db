@@ -55,3 +55,6 @@ sqlite-*/
 
 # Assistant tooling
 .claude/
+
+# GoReleaser output
+/dist/

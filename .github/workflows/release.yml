@@ -1,0 +1,42 @@
+# Cut a release on every version tag:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Runs the test suite, then GoReleaser builds nteedb-server for macOS
+# (universal) and Linux (amd64/arm64) and publishes the GitHub Release plus
+# the Homebrew cask (see .goreleaser.yaml). Runs entirely on a Linux runner —
+# the server build is pure Go, so no macOS minutes are spent.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: GoReleaser derives the changelog from it
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A PAT with Contents read/write on nickooan/homebrew-tap, used by
+          # GoReleaser to push the cask (see .goreleaser.yaml).
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
