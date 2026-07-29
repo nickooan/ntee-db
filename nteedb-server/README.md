@@ -226,12 +226,13 @@ Values of `number`-kind indexes are parsed from the token (`ix status 200`).
 | --- | --- | --- |
 | `put <pk> <nbytes>` + value block | Put | `true` — length-prefixed: exactly `nbytes` raw bytes follow, then a newline |
 | `put <pk> <inline value…rest of line>` | Put | `true` — sugar for single-line values |
-| `putx <pk> <ixbytes> <nbytes>` + 2 blocks | PutIndexed | `true` — index-values JSON block, then value block; the value must be a JSON object (immediate values — strings, numbers, booleans, arrays, binary — are primary-key-only and cannot carry index values) |
+| `putex <pk> <ttlms> <nbytes>` + value block | Put + TTL | `true` — the framed put with a time-to-live in milliseconds |
+| `putx <pk> <ixbytes> <nbytes> [ttlms]` + 2 blocks | PutIndexed | `true` — index-values JSON block, then value block; the value must be a JSON object (immediate values — strings, numbers, booleans, arrays, binary — are primary-key-only and cannot carry index values); optional TTL |
 | `del <pk>` | Delete | `true` |
-| `incr <pk> [delta]` | Incr | new value as a JSON number (delta defaults to 1) |
-| `decr <pk> [delta]` | Incr | new value as a JSON number (delta defaults to 1) |
-| `topup <pk> <amount> <max>` | Topup | overflow as a JSON number: how much of `amount` didn't fit under `max` (0 = fully applied) |
-| `take <pk> <amount> <left>` | Take | `true` if applied (result stayed ≥ left), `false` if refused — value untouched |
+| `incr <pk> [delta] [ttlms]` | Incr | new value as a JSON number (delta defaults to 1); ttl applies only when this call creates the key |
+| `decr <pk> [delta] [ttlms]` | Incr | new value as a JSON number (delta defaults to 1) |
+| `topup <pk> <amount> <max> [ttlms]` | Topup | overflow as a JSON number: how much of `amount` didn't fit under `max` (0 = fully applied); ttl on create only |
+| `take <pk> <amount> <left> [ttlms]` | Take | `true` if applied (result stayed ≥ left), `false` if refused — value untouched; ttl on create only |
 | `rml <cutoff>` | RemoveByPkLess | count of deleted keys (`< cutoff`) |
 | `rmg <cutoff>` | RemoveByPkGreater | count of deleted keys (`> cutoff`) |
 
@@ -258,6 +259,22 @@ secondary indexes (they are primary-key-only, like every immediate value) and
 are stored fixed-width (sign + 19 digits), so increments rewrite bytes in
 place instead of growing the log; plain `get` therefore returns the raw
 20-char string rather than a number — prefer `incr <pk> 0` to read one.
+
+**TTL (lazy expiry).** Any write can carry a time-to-live: `putex` for plain
+values, the optional trailing `ttlms` on `putx` and the counter commands.
+Expiry lives in the primary-key index only and is enforced **lazily**: once
+the TTL passes, `get`/`has`/`getm`/`scan` report the key missing (and a
+background reaper then deletes it durably); nothing scans for expired keys,
+and `compact`/`reindex` drop any leftovers as they rewrite. Semantics to
+know: a plain `put` **clears** an existing TTL (the write replaces the
+record wholesale); the counter commands apply their `ttlms` **only when the
+call creates the key** — a live counter keeps its original deadline, and an
+expired one restarts from 0 with the new ttl. That makes
+`incr window 1 60000` a complete fixed-window rate limiter: the first
+request arms a one-minute window, requests count within it, and the window
+restarts after it lapses. One caveat: secondary indexes are TTL-unaware, so
+an expired key can appear in `ix`/`ixh`/`ixp`/`ixr` results until its
+cleanup runs — `ixrec` and `getm` already drop such keys from their results.
 
 A full `putx` frame on the wire:
 

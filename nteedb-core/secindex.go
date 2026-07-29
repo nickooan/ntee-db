@@ -367,7 +367,7 @@ func (si *secIndex) rangeQuery(lo, hi any) ([]string, error) {
 //
 // Locking: acquires nothing itself — db.mu must already be held by the
 // caller (Put/PutIndexed take it via lockWrite).
-func (db *DB) write(key string, value []byte, explicit IndexValues) error {
+func (db *DB) write(key string, value []byte, explicit IndexValues, exp int64) error {
 	ix, err := db.buildIndexValues(key, value, explicit)
 	if err != nil {
 		return err
@@ -375,7 +375,7 @@ func (db *DB) write(key string, value []byte, explicit IndexValues) error {
 	if err := db.checkSelfEviction(key, ix); err != nil {
 		return err
 	}
-	if err := db.appendRecord(key, value, ix, db.opts.SyncEveryWrite, false); err != nil {
+	if err := db.appendRecord(key, value, ix, exp, db.opts.SyncEveryWrite, false); err != nil {
 		return err
 	}
 	if err := db.enforceMaxPerValue(ix); err != nil {
@@ -397,7 +397,7 @@ func (db *DB) write(key string, value []byte, explicit IndexValues) error {
 // Locking: acquires nothing itself — db.mu must already be held by the
 // caller (the exported writers take it via lockWrite). Callers must also
 // have validated ix via buildIndexValues.
-func (db *DB) appendRecord(key string, value []byte, ix map[string]any, durable, counter bool) error {
+func (db *DB) appendRecord(key string, value []byte, ix map[string]any, exp int64, durable, counter bool) error {
 	// Large values go to the blob side file; the main record just references
 	// them. The blob is fsynced before the referencing main record is appended —
 	// on EVERY path, not just durable mode: the two live in different files, so
@@ -405,7 +405,7 @@ func (db *DB) appendRecord(key string, value []byte, ix map[string]any, durable,
 	// blob bytes are still in the page cache, leaving a reference past the end
 	// of blobs.dat. With it, a crash can only ever orphan a blob. Blobs are rare
 	// (values >= BlobThreshold), so the extra fsync on the fast path is cheap.
-	rec := record{Key: key, Value: value, IX: ix, Counter: counter}
+	rec := record{Key: key, Value: value, IX: ix, Counter: counter, Exp: exp}
 	if !counter && db.useBlobFor(len(value)) {
 		bs := db.curBlobs()
 		ref, err := bs.append(value)
@@ -416,14 +416,14 @@ func (db *DB) appendRecord(key string, value []byte, ix map[string]any, durable,
 			return err
 		}
 		ref.Gen = db.curGen
-		rec = record{Key: key, Blob: &ref, IX: ix}
+		rec = record{Key: key, Blob: &ref, IX: ix, Exp: exp}
 	}
 
 	off, n, err := db.main.appendSync(rec, durable)
 	if err != nil {
 		return err
 	}
-	db.pk.upsert(pkEntry{key: key, off: off, n: n})
+	db.pk.upsert(pkEntry{key: key, off: off, n: n, exp: exp})
 	db.refreshSec(key, ix)
 	return nil
 }
@@ -462,14 +462,9 @@ func (db *DB) enforceMaxPerValue(ix map[string]any) error {
 			victims = append(victims, si.at(i).pk)
 		}
 		for _, pk := range victims {
-			if _, _, err := db.main.append(record{Key: pk, Deleted: true}); err != nil {
+			if err := db.deleteLocked(pk); err != nil {
 				return err
 			}
-			// Retract BEFORE removing the primary entry — the retraction reads
-			// the victim's ix values off that entry.
-			db.retractSec(pk)
-			db.pk.remove(pk)
-			db.writes++
 		}
 	}
 	return nil

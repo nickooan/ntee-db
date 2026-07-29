@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"math"
+	"time"
 )
 
 // ErrNotCounter is returned by Incr when the key holds a value that was not
@@ -88,21 +89,32 @@ func parseCounter(b []byte) (int64, bool) {
 // fixed-width form (see counterWidth), an increment overwrites the digits in
 // place: no log growth, no index churn. Only initialization (and the
 // defensive format-mismatch path) appends a record.
-func (db *DB) Incr(key string, delta int64) (int64, error) {
+//
+// The optional ttl (at most one, positive) is applied ONLY when this call
+// creates the key — an existing counter's expiry is preserved untouched, and
+// an expired counter is deleted and recreated fresh (restarting the window
+// with the new ttl). That is the fixed-window rate-limit primitive:
+// Incr(w, 1, time.Minute) arms a one-minute window on its first request,
+// counts within it, and restarts at 1 once it lapses.
+func (db *DB) Incr(key string, delta int64, ttl ...time.Duration) (int64, error) {
+	createExp, err := resolveTTL(ttl)
+	if err != nil {
+		return 0, err
+	}
 	db.lockWrite()
 	defer db.mu.Unlock()
 	if db.closed {
 		return 0, ErrClosed
 	}
-	return db.incr(key, delta)
+	return db.incr(key, delta, createExp)
 }
 
 // incr is Incr's overflow-checked increment step over counterUpdate.
 //
 // Locking: acquires nothing itself — db.mu must already be held by the
 // caller (Incr takes it via lockWrite).
-func (db *DB) incr(key string, delta int64) (int64, error) {
-	next, _, err := db.counterUpdate(key, func(cur int64) (int64, bool, error) {
+func (db *DB) incr(key string, delta int64, createExp int64) (int64, error) {
+	next, _, err := db.counterUpdate(key, createExp, func(cur int64) (int64, bool, error) {
 		if (delta > 0 && cur > math.MaxInt64-delta) || (delta < 0 && cur < math.MinInt64-delta) {
 			return 0, false, ErrCounterOverflow
 		}
@@ -122,9 +134,15 @@ func (db *DB) incr(key string, delta int64) (int64, error) {
 //
 // On any error the returned count is -1, never 0 — the number alone
 // distinguishes error (-1), fully applied (0), and clamped (> 0).
-func (db *DB) Topup(key string, amount, max int64) (int64, error) {
+//
+// The optional ttl is applied only when this call creates the key (see Incr).
+func (db *DB) Topup(key string, amount, max int64, ttl ...time.Duration) (int64, error) {
 	if amount < 0 {
 		return -1, ErrNegativeAmount
+	}
+	createExp, err := resolveTTL(ttl)
+	if err != nil {
+		return -1, err
 	}
 	db.lockWrite()
 	defer db.mu.Unlock()
@@ -132,7 +150,7 @@ func (db *DB) Topup(key string, amount, max int64) (int64, error) {
 		return -1, ErrClosed
 	}
 	var overflow int64
-	_, _, err := db.counterUpdate(key, func(cur int64) (int64, bool, error) {
+	_, _, err = db.counterUpdate(key, createExp, func(cur int64) (int64, bool, error) {
 		var applied int64
 		switch {
 		case cur >= max:
@@ -163,16 +181,22 @@ func (db *DB) Topup(key string, amount, max int64) (int64, error) {
 // reports false without creating the key. A difference that would leave the
 // int64 range is necessarily below left, so it reports false rather than an
 // error.
-func (db *DB) Take(key string, amount, left int64) (bool, error) {
+//
+// The optional ttl is applied only when this call creates the key (see Incr).
+func (db *DB) Take(key string, amount, left int64, ttl ...time.Duration) (bool, error) {
 	if amount < 0 {
 		return false, ErrNegativeAmount
+	}
+	createExp, err := resolveTTL(ttl)
+	if err != nil {
+		return false, err
 	}
 	db.lockWrite()
 	defer db.mu.Unlock()
 	if db.closed {
 		return false, ErrClosed
 	}
-	_, applied, err := db.counterUpdate(key, func(cur int64) (int64, bool, error) {
+	_, applied, err := db.counterUpdate(key, createExp, func(cur int64) (int64, bool, error) {
 		if cur < math.MinInt64+amount { // cur-amount underflows: certainly < left
 			return 0, false, nil
 		}
@@ -185,18 +209,29 @@ func (db *DB) Take(key string, amount, left int64) (bool, error) {
 	return applied, err
 }
 
-// counterUpdate reads the counter at key (missing or deleted reads as
-// 0), asks step for the next value, and — when step applies — writes it
+// counterUpdate reads the counter at key (missing, deleted, or EXPIRED reads
+// as 0), asks step for the next value, and — when step applies — writes it
 // through the same in-place-patch / append machinery Incr uses. When step
 // declines (apply false), nothing is written: no append, no pk entry for a
-// missing key, no write/hint bookkeeping.
+// missing key, no write/hint bookkeeping. createExp arms an expiry only on
+// the create path; a live counter keeps its existing expiry across both the
+// in-place patch and the append fallback.
 //
 // Locking: acquires nothing itself — db.mu must already be held by the
 // caller (Incr/Topup/Take take it via lockWrite before calling in; the step
 // closure therefore also runs under the write lock, which is what makes the
-// read-check-write atomic).
-func (db *DB) counterUpdate(key string, step func(cur int64) (next int64, apply bool, err error)) (int64, bool, error) {
+// read-check-write atomic). Holding the write lock is also why an expired
+// counter is cleaned up inline here rather than via the async reaper.
+func (db *DB) counterUpdate(key string, createExp int64, step func(cur int64) (next int64, apply bool, err error)) (int64, bool, error) {
 	e, ok := db.pk.get(key)
+	if ok && e.expiredAt(nowMillis()) {
+		// The window lapsed: durably delete the stale counter and fall into
+		// the create path, so the count restarts from 0 with a fresh expiry.
+		if err := db.deleteLocked(key); err != nil {
+			return 0, false, err
+		}
+		ok = false
+	}
 	if !ok {
 		// Missing (or previously deleted — tombstones drop the pk entry):
 		// treat as 0; an applied step creates the entry via the append path.
@@ -204,7 +239,7 @@ func (db *DB) counterUpdate(key string, step func(cur int64) (next int64, apply 
 		if err != nil || !apply {
 			return next, false, err
 		}
-		return next, true, db.incrAppend(key, next)
+		return next, true, db.incrAppend(key, next, createExp)
 	}
 
 	rec, err := db.readRecord(e)
@@ -250,18 +285,19 @@ func (db *DB) counterUpdate(key string, step func(cur int64) (next int64, apply 
 		// Any mismatch (marshal drift, length, pattern): fall through to the
 		// always-correct append path.
 	}
-	return next, true, db.incrAppend(key, next)
+	return next, true, db.incrAppend(key, next, e.exp) // preserve the live TTL
 }
 
 // incrAppend appends the counter's new value as a fresh record. Counters
 // are pure key:value pairs — no secondary index derivation, no eviction
 // bookkeeping — so this is a bare append with the counter flag set (nil ix
 // also retracts any stale index entries if a legacy record carried them).
+// exp carries the counter's expiry (0 = none) into the rewritten record.
 //
 // Locking: acquires nothing itself — db.mu must already be held by the
 // caller (reached only from counterUpdate, under the write lock).
-func (db *DB) incrAppend(key string, v int64) error {
-	if err := db.appendRecord(key, formatCounter(v), nil, db.opts.SyncEveryWrite, true); err != nil {
+func (db *DB) incrAppend(key string, v int64, exp int64) error {
+	if err := db.appendRecord(key, formatCounter(v), nil, exp, db.opts.SyncEveryWrite, true); err != nil {
 		return err
 	}
 	db.writes++

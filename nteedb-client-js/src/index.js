@@ -11,6 +11,8 @@ import {
   decodeValue,
   buildPut,
   buildPutx,
+  buildPutex,
+  ttlArg,
 } from "./protocol.js"
 
 /** A command the server answered with {"ok":false,"err":…}. The connection
@@ -373,13 +375,22 @@ export class NteeClient {
    * {indexName: string|number} — the write is indexed (server-side putx);
    * indexed values must be JSON objects. Always uses the length-prefixed
    * wire form, so values may be empty, binary, or contain newlines.
+   *
+   * ttlMs (optional, positive integer) gives the key a time-to-live: once
+   * it elapses the key reads as missing and is lazily deleted server-side.
+   * A put WITHOUT a ttl clears any existing TTL. Secondary indexes are
+   * TTL-unaware — an expired key may appear in secIndex* key results until
+   * cleanup (record fetches already drop it).
    */
-  put(key, value, ix = undefined) {
+  put(key, value, ix = undefined, ttlMs = undefined) {
     assertToken("key", key)
+    const ttl = ttlArg(ttlMs)
     const v = toStorable(value)
     const valueBuf = Buffer.isBuffer(v) ? v : Buffer.from(v)
     if (ix === undefined) {
-      return this.#send("put", buildPut(key, valueBuf))
+      return ttl > 0
+        ? this.#send("putex", buildPutex(key, ttl, valueBuf))
+        : this.#send("put", buildPut(key, valueBuf))
     }
     if (ix === null || typeof ix !== "object" || Array.isArray(ix)) {
       throw new TypeError(
@@ -388,7 +399,7 @@ export class NteeClient {
     }
     return this.#send(
       "putx",
-      buildPutx(key, Buffer.from(JSON.stringify(ix)), valueBuf),
+      buildPutx(key, Buffer.from(JSON.stringify(ix)), valueBuf, ttl),
     )
   }
 
@@ -401,38 +412,55 @@ export class NteeClient {
   /** Atomically add delta (default 1) to the int64 counter at key; resolves
    * to the new value. A missing key initializes to 0 first — incr(key, 0)
    * reads a counter. Rejects on non-counter values and int64 overflow.
-   * Values beyond ±2^53 lose precision as JS numbers. */
-  incr(key, delta = 1) {
+   * Values beyond ±2^53 lose precision as JS numbers.
+   *
+   * ttlMs (optional) applies ONLY when this call creates the key — a live
+   * counter keeps its deadline, an expired one restarts from 0 with the new
+   * ttl. incr(w, 1, 60000) is a complete fixed-window rate limiter. */
+  incr(key, delta = 1, ttlMs = undefined) {
     assertToken("key", key)
     assertSafeInt("delta", delta)
-    return this.#cmd("incr", [key, String(delta)])
+    const ttl = ttlArg(ttlMs)
+    const args = [key, String(delta)]
+    if (ttl > 0) args.push(String(ttl))
+    return this.#cmd("incr", args)
   }
 
   /** Atomically subtract delta (default 1); incr with a negated delta. */
-  decr(key, delta = 1) {
+  decr(key, delta = 1, ttlMs = undefined) {
     assertToken("key", key)
     assertSafeInt("delta", delta)
-    return this.#cmd("decr", [key, String(delta)])
+    const ttl = ttlArg(ttlMs)
+    const args = [key, String(delta)]
+    if (ttl > 0) args.push(String(ttl))
+    return this.#cmd("decr", args)
   }
 
   /** Atomically add up to amount (>= 0) to the counter, clamped at max;
    * resolves to the overflow that did NOT fit (0 = fully applied; a counter
    * already at/above max is left unchanged). Missing key counts as 0 and is
-   * created when anything is added. */
-  topup(key, amount, max) {
+   * created when anything is added. ttlMs applies on create only. */
+  topup(key, amount, max, ttlMs = undefined) {
     assertToken("key", key)
     assertSafeInt("amount", amount)
     assertSafeInt("max", max)
-    return this.#cmd("topup", [key, String(amount), String(max)])
+    const ttl = ttlArg(ttlMs)
+    const args = [key, String(amount), String(max)]
+    if (ttl > 0) args.push(String(ttl))
+    return this.#cmd("topup", args)
   }
 
   /** Atomically subtract amount (>= 0) only if the result stays >= left;
-   * resolves true iff applied (false leaves the value untouched). */
-  take(key, amount, left) {
+   * resolves true iff applied (false leaves the value untouched). ttlMs
+   * applies on create only. */
+  take(key, amount, left, ttlMs = undefined) {
     assertToken("key", key)
     assertSafeInt("amount", amount)
     assertSafeInt("left", left)
-    return this.#cmd("take", [key, String(amount), String(left)])
+    const ttl = ttlArg(ttlMs)
+    const args = [key, String(amount), String(left)]
+    if (ttl > 0) args.push(String(ttl))
+    return this.#cmd("take", args)
   }
 
   /** Delete every key strictly below cutoff; resolves to the count. */

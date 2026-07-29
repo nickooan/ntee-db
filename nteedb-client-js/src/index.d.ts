@@ -168,23 +168,47 @@ export declare class NteeClient {
 
   /** Store value under key; with ix, an indexed write (the value must then
    * be a JSON object). Always length-prefixed on the wire — values may be
-   * empty, binary, or contain newlines. */
-  put(key: string, value: Value, ix?: IndexValues): Promise<true>
+   * empty, binary, or contain newlines.
+   *
+   * ttlMs (positive integer) gives the key a time-to-live: once elapsed the
+   * key reads as missing and is lazily deleted server-side. A put WITHOUT a
+   * ttl clears any existing TTL. Secondary indexes are TTL-unaware — an
+   * expired key may appear in secIndex* key results until cleanup. */
+  put(
+    key: string,
+    value: Value,
+    ix?: IndexValues,
+    ttlMs?: number,
+  ): Promise<true>
   /** Delete key; resolves true whether or not it existed. */
   delete(key: string): Promise<true>
   /** Atomically add delta (default 1) to the int64 counter at key; resolves
    * to the new value. Missing key initializes to 0 — incr(key, 0) reads a
-   * counter. Rejects on non-counter values and int64 overflow. */
-  incr(key: string, delta?: number): Promise<number>
+   * counter. Rejects on non-counter values and int64 overflow.
+   *
+   * ttlMs applies ONLY when this call creates the key: a live counter keeps
+   * its deadline, an expired one restarts from 0 with the new ttl —
+   * incr(w, 1, 60000) is a complete fixed-window rate limiter. */
+  incr(key: string, delta?: number, ttlMs?: number): Promise<number>
   /** Atomically subtract delta (default 1); incr with a negated delta. */
-  decr(key: string, delta?: number): Promise<number>
+  decr(key: string, delta?: number, ttlMs?: number): Promise<number>
   /** Atomically add up to amount (>= 0), clamped at max; resolves to the
    * overflow that did NOT fit (0 = fully applied; a counter already at or
-   * above max is left unchanged). */
-  topup(key: string, amount: number, max: number): Promise<number>
+   * above max is left unchanged). ttlMs applies on create only. */
+  topup(
+    key: string,
+    amount: number,
+    max: number,
+    ttlMs?: number,
+  ): Promise<number>
   /** Atomically subtract amount (>= 0) only if the result stays >= left;
-   * resolves true iff applied. */
-  take(key: string, amount: number, left: number): Promise<boolean>
+   * resolves true iff applied. ttlMs applies on create only. */
+  take(
+    key: string,
+    amount: number,
+    left: number,
+    ttlMs?: number,
+  ): Promise<boolean>
   /** Delete every key strictly below cutoff; resolves to the count. */
   removeByPkLess(cutoff: string): Promise<number>
   /** Delete every key strictly above cutoff; resolves to the count. */

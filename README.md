@@ -36,6 +36,11 @@ your app, in the same spirit as `lmdb` or SQLite in embedded mode.
   Counters are stored fixed-width and updated
   **in place**: a hot counter never grows the log and never creates
   compaction debt.
+- **Per-key TTL, lazily enforced** — an optional `ttl` on any write; expiry
+  lives in the primary-key index (zero-cost check at lookup), expired keys
+  read as missing and are reaped in the background, and compaction drops
+  leftovers. On counters the ttl applies on create only, making
+  `Incr(key, 1, time.Minute)` a complete fixed-window rate limiter.
 - **Single-writer safety** via kernel `flock` (releases on any process exit).
   Unix (macOS/Linux) only.
 - Pure Go; the only dependency is

@@ -4,13 +4,25 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"math"
 	"strconv"
+	"time"
 
 	nteedb "github.com/nickooan/ntee-db/nteedb-core"
 )
 
 var jsonNull = json.RawMessage("null")
+
+// parseTTLMillis parses an optional trailing ttlms token: a positive integer
+// number of milliseconds.
+func parseTTLMillis(cmd, tok string) (time.Duration, error) {
+	ms, err := strconv.ParseInt(tok, 10, 64)
+	if err != nil || ms <= 0 {
+		return 0, fmt.Errorf("%s: ttlms must be a positive integer, got %q", cmd, tok)
+	}
+	return time.Duration(ms) * time.Millisecond, nil
+}
 
 // dispatch runs one command. A returned error is fatal for the connection
 // (stream desync / oversized frame); ordinary command failures are written to
@@ -206,14 +218,47 @@ func (s *Server) dispatch(rw respWriter, r *bufio.Reader, line []byte, st *connS
 		}
 		return false, rw.ok(true)
 
-	case "putx":
+	case "putex":
+		// The framed put with a time-to-live. A trailing TTL on plain `put`
+		// would be ambiguous with its inline form (`put k 5 1000` stores the
+		// string "5 1000" today), so the TTL variant is its own framed-only
+		// command; clients hide it behind put(key, value, ttl).
 		if len(args) != 3 {
-			return false, rw.fail("usage: putx <pk> <ixbytes> <nbytes>")
+			return false, rw.fail("usage: putex <pk> <ttlms> <nbytes>")
+		}
+		ttl, terr := parseTTLMillis("putex", args[1])
+		n, err := strconv.Atoi(args[2])
+		if err != nil {
+			return false, rw.fail("usage: putex <pk> <ttlms> <nbytes>")
+		}
+		value, err := readData(r, n, s.cfg.MaxValue)
+		if err != nil {
+			return false, err // stream position unknown → fatal
+		}
+		if terr != nil {
+			return false, rw.fail("%v", terr) // after the block: stream stays in sync
+		}
+		if err := s.db.Put(args[0], value, ttl); err != nil {
+			return false, rw.fail("%v", err)
+		}
+		return false, rw.ok(true)
+
+	case "putx":
+		if len(args) < 3 || len(args) > 4 {
+			return false, rw.fail("usage: putx <pk> <ixbytes> <nbytes> [ttlms]")
 		}
 		ixLen, err1 := strconv.Atoi(args[1])
 		valLen, err2 := strconv.Atoi(args[2])
 		if err1 != nil || err2 != nil {
-			return false, rw.fail("usage: putx <pk> <ixbytes> <nbytes>")
+			return false, rw.fail("usage: putx <pk> <ixbytes> <nbytes> [ttlms]")
+		}
+		var ttl []time.Duration
+		var terr error
+		if len(args) == 4 {
+			var d time.Duration
+			if d, terr = parseTTLMillis("putx", args[3]); terr == nil {
+				ttl = append(ttl, d)
+			}
 		}
 		ixRaw, err := readData(r, ixLen, s.cfg.MaxValue)
 		if err != nil {
@@ -223,26 +268,37 @@ func (s *Server) dispatch(rw respWriter, r *bufio.Reader, line []byte, st *connS
 		if err != nil {
 			return false, err
 		}
+		if terr != nil {
+			return false, rw.fail("%v", terr) // after the blocks: stream stays in sync
+		}
 		var ix nteedb.IndexValues
 		if err := json.Unmarshal(ixRaw, &ix); err != nil {
 			return false, rw.fail("putx: index values are not a JSON object: %v", err)
 		}
-		if err := s.db.PutIndexed(args[0], value, ix); err != nil {
+		if err := s.db.PutIndexed(args[0], value, ix, ttl...); err != nil {
 			return false, rw.fail("%v", err)
 		}
 		return false, rw.ok(true)
 
 	case "incr", "decr":
-		if len(args) < 1 || len(args) > 2 {
-			return false, rw.fail("usage: %s <pk> [delta]", cmd)
+		if len(args) < 1 || len(args) > 3 {
+			return false, rw.fail("usage: %s <pk> [delta] [ttlms]", cmd)
 		}
 		delta := int64(1)
-		if len(args) == 2 {
+		if len(args) >= 2 {
 			var err error
 			delta, err = strconv.ParseInt(args[1], 10, 64)
 			if err != nil {
 				return false, rw.fail("%s: delta must be an integer, got %q", cmd, args[1])
 			}
+		}
+		var ttl []time.Duration
+		if len(args) == 3 {
+			d, err := parseTTLMillis(cmd, args[2])
+			if err != nil {
+				return false, rw.fail("%v", err)
+			}
+			ttl = append(ttl, d)
 		}
 		if cmd == "decr" {
 			if delta == math.MinInt64 {
@@ -250,7 +306,7 @@ func (s *Server) dispatch(rw respWriter, r *bufio.Reader, line []byte, st *connS
 			}
 			delta = -delta
 		}
-		v, err := s.db.Incr(args[0], delta)
+		v, err := s.db.Incr(args[0], delta, ttl...)
 		if err != nil {
 			return false, rw.fail("%v", err)
 		}
@@ -261,8 +317,8 @@ func (s *Server) dispatch(rw respWriter, r *bufio.Reader, line []byte, st *connS
 		if cmd == "take" {
 			bound = "left"
 		}
-		if len(args) != 3 {
-			return false, rw.fail("usage: %s <pk> <amount> <%s>", cmd, bound)
+		if len(args) < 3 || len(args) > 4 {
+			return false, rw.fail("usage: %s <pk> <amount> <%s> [ttlms]", cmd, bound)
 		}
 		amount, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
@@ -272,14 +328,22 @@ func (s *Server) dispatch(rw respWriter, r *bufio.Reader, line []byte, st *connS
 		if err != nil {
 			return false, rw.fail("%s: %s must be an integer, got %q", cmd, bound, args[2])
 		}
+		var ttl []time.Duration
+		if len(args) == 4 {
+			d, err := parseTTLMillis(cmd, args[3])
+			if err != nil {
+				return false, rw.fail("%v", err)
+			}
+			ttl = append(ttl, d)
+		}
 		if cmd == "topup" {
-			over, err := s.db.Topup(args[0], amount, limit)
+			over, err := s.db.Topup(args[0], amount, limit, ttl...)
 			if err != nil {
 				return false, rw.fail("%v", err)
 			}
 			return false, rw.ok(over)
 		}
-		applied, err := s.db.Take(args[0], amount, limit)
+		applied, err := s.db.Take(args[0], amount, limit, ttl...)
 		if err != nil {
 			return false, rw.fail("%v", err)
 		}

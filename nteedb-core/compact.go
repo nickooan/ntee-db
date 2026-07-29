@@ -324,9 +324,17 @@ func (db *DB) buildRewrite(path string, transform func(record) (record, error)) 
 	newIdx := newPkIndex()
 	var off int64
 	var scanErr error
+	now := nowMillis()
 	db.pk.scan(func(e pkEntry) bool { // ascending key order → newIdx.load bulk path
 		if rewriteRecordHook != nil {
 			rewriteRecordHook()
+		}
+		if e.expiredAt(now) {
+			// Expired keys are dropped by the way: never written, never in
+			// newIdx — and rebuildSec after the swap purges their secondary
+			// entries. This is the backstop for anything the lazy reaper
+			// never got to. Checked on the in-memory entry, before the pread.
+			return true
 		}
 		rec, err := db.readRecord(e)
 		if err != nil {
@@ -347,7 +355,7 @@ func (db *DB) buildRewrite(path string, transform func(record) (record, error)) 
 			return false
 		}
 		n := int32(len(line))
-		newIdx.load(pkEntry{key: e.key, off: off, n: n, ix: rec.IX})
+		newIdx.load(pkEntry{key: e.key, off: off, n: n, ix: rec.IX, exp: rec.Exp})
 		off += int64(n)
 		return true
 	})

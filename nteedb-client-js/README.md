@@ -7,7 +7,8 @@ just `node:net` and the standard library.
 
 - Covers **every server command** — KV reads/writes, indexed writes, all
   secondary-index queries, atomic counters (`incr`/`decr`/`topup`/`take`),
-  range deletes, stats, and the admin commands.
+  **per-key TTL** (lazy expiry; optional `ttlMs` on every write), range
+  deletes, stats, and the admin commands.
 - **Pipelines natively**: fire commands without awaiting; responses resolve in
   order over one socket.
 - Always uses the **length-prefixed wire form** for writes, so values can be
@@ -58,6 +59,11 @@ await db.secIndexRange("status", 200, 299) // ["call:1"]
 await db.incr("hits") // 1
 await db.topup("quota", 10, 100) // 0 = fully applied (overflow count)
 await db.take("quota", 3, 0) // true = applied (all-or-nothing)
+
+// TTL: optional ttlMs on any write. On counters it applies on create only,
+// which makes this line a complete fixed-window rate limiter:
+await db.incr("rl:user1", 1, 60_000) // arms a 60s window on first request
+await db.put("session:9", { user: 1 }, undefined, 30 * 60_000) // ephemeral value
 
 await db.close()
 ```
@@ -141,10 +147,11 @@ Every method maps 1:1 to a server command. Method names mirror the embedded
 | `secIndexRecords(name, val, limit?)`                   | `ixrec`                 | `[{key, value}]` decoded                                               |
 | `put(key, value)`                                      | `put` (length-prefixed) | `true`                                                                 |
 | `put(key, value, ix)`                                  | `putx`                  | `true` (value must be a JSON object)                                   |
+| `put(key, value, ix?, ttlMs)`                          | `putex` / `putx` + ttl  | `true` — write with a time-to-live                                     |
 | `delete(key)`                                          | `del`                   | `true` (even if absent)                                                |
-| `incr(key, delta?)` / `decr(key, delta?)`              | `incr`/`decr`           | new counter value                                                      |
-| `topup(key, amount, max)`                              | `topup`                 | overflow that didn't fit (`0` = fully applied)                         |
-| `take(key, amount, left)`                              | `take`                  | `true` iff applied                                                     |
+| `incr(key, delta?, ttlMs?)` / `decr(...)`              | `incr`/`decr`           | new counter value (ttl applies on create only)                         |
+| `topup(key, amount, max, ttlMs?)`                      | `topup`                 | overflow that didn't fit (`0` = fully applied)                         |
+| `take(key, amount, left, ttlMs?)`                      | `take`                  | `true` iff applied                                                     |
 | `removeByPkLess(cutoff)` / `removeByPkGreater(cutoff)` | `rml`/`rmg`             | deleted count                                                          |
 | `stats()`                                              | `stats`                 | `{records, mainBytes, liveBytes, blobBytes, connections, …}`           |
 | `secIndexDropped()` / `secIndexProspective()`          | `dropped`/`prospective` | index names                                                            |
@@ -167,6 +174,20 @@ requires admin`, …). The connection remains usable.
 One error is both: an oversized command line or value (server limits: 1 MiB
 per line, 32 MiB per value) rejects the offending command with the server's
 error _and then the server closes the connection_ — treat it as fatal.
+
+## TTL (lazy expiry)
+
+Any write can carry a `ttlMs`. Expiry lives in the server's primary-key
+index and is enforced **lazily**: once the TTL passes, the key reads as
+missing everywhere (`get`/`has`/`getMany`/`prefixScan`) and a background
+reaper deletes it durably; leftovers are dropped by `compact`/`reindex`.
+Semantics: a `put` **without** a ttl clears an existing one (the write
+replaces the record); counter ttls apply **only when the call creates the
+key** — a live counter keeps its deadline and an expired one restarts from
+0 with the new ttl. Caveat: secondary indexes are TTL-unaware, so an
+expired key can linger in `secIndex`/`secIndexHas`/... key results until
+its cleanup runs — `secIndexRecords` and `getMany` already drop it. There
+is no remaining-TTL query; re-arm by rewriting with `put(..., ttlMs)`.
 
 ## Notes / limitations
 
