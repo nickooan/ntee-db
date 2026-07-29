@@ -704,6 +704,82 @@ func BenchmarkIncr(b *testing.B) {
 	}
 }
 
+// BenchmarkTopup measures the applied path: the bound check plus the same
+// in-place patch as Incr (max is never reached, so every op writes).
+func BenchmarkTopup(b *testing.B) {
+	db, err := Open(Options{Dir: b.TempDir()})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Incr("c", 1); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if over, err := db.Topup("c", 1, math.MaxInt64); err != nil || over != 0 {
+			b.Fatal(over, err)
+		}
+	}
+}
+
+// BenchmarkTopupRefused measures the refused path: read and compare only,
+// nothing written (the counter sits at or above max on every op).
+func BenchmarkTopupRefused(b *testing.B) {
+	db, err := Open(Options{Dir: b.TempDir()})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Incr("c", 1); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if over, err := db.Topup("c", 1, 0); err != nil || over != 1 {
+			b.Fatal(over, err)
+		}
+	}
+}
+
+// BenchmarkTake measures the applied path (seeded far above the floor so
+// b.N iterations can never drain it).
+func BenchmarkTake(b *testing.B) {
+	db, err := Open(Options{Dir: b.TempDir()})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Incr("c", math.MaxInt64); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if ok, err := db.Take("c", 1, 0); err != nil || !ok {
+			b.Fatal(ok, err)
+		}
+	}
+}
+
+// BenchmarkTakeRefused measures the refused path: the counter stays at 0, so
+// every take is rejected before any write.
+func BenchmarkTakeRefused(b *testing.B) {
+	db, err := Open(Options{Dir: b.TempDir()})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Incr("c", 0); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if ok, err := db.Take("c", 1, 0); err != nil || ok {
+			b.Fatal(ok, err)
+		}
+	}
+}
+
 // BenchmarkIncrDurable is the same with per-write fsync, the durability mode's
 // floor for every write op.
 func BenchmarkIncrDurable(b *testing.B) {

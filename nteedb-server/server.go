@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -17,7 +18,9 @@ import (
 const serverVersion = "0.1.0"
 
 type Config struct {
-	Addr        string
+	Addr        string        // plain listener; "" disables it (TLS-only)
+	TLSAddr     string        // TLS listener address; used only when TLSConfig is set
+	TLSConfig   *tls.Config   // nil = no TLS listener
 	IdleTimeout time.Duration // 0 disables the per-command read deadline
 	MaxLine     int           // command line limit (inline puts included)
 	MaxValue    int           // length-prefixed data block limit
@@ -52,7 +55,8 @@ type Server struct {
 	schema *Schema
 	kinds  map[string]nteedb.ValueKind
 
-	ln     net.Listener
+	ln     net.Listener // plain TCP; nil when Config.Addr is ""
+	tlsLn  net.Listener // TLS; nil when Config.TLSConfig is nil
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
 	wg     sync.WaitGroup
@@ -99,28 +103,86 @@ func NewServer(cfg Config, db *nteedb.DB, auth *authStore, schema *Schema) *Serv
 	}
 }
 
-// Listen binds the address. Split from Serve so callers (and tests, with
-// port 0) can learn the bound address before serving.
+// Listen binds the configured addresses — the plain listener (unless
+// Config.Addr is empty) and the TLS listener (when Config.TLSConfig is set).
+// Split from Serve so callers (and tests, with port 0) can learn the bound
+// addresses before serving.
 func (s *Server) Listen() error {
-	ln, err := net.Listen("tcp", s.cfg.Addr)
-	if err != nil {
-		return err
+	if s.cfg.Addr == "" && s.cfg.TLSConfig == nil {
+		return errors.New("no listener configured: set Addr and/or TLSConfig")
 	}
-	s.ln = ln
+	if s.cfg.Addr != "" {
+		ln, err := net.Listen("tcp", s.cfg.Addr)
+		if err != nil {
+			return err
+		}
+		s.ln = ln
+	}
+	if s.cfg.TLSConfig != nil {
+		ln, err := net.Listen("tcp", s.cfg.TLSAddr)
+		if err != nil {
+			if s.ln != nil {
+				s.ln.Close()
+				s.ln = nil
+			}
+			return fmt.Errorf("tls listener: %w", err)
+		}
+		s.tlsLn = tls.NewListener(ln, s.cfg.TLSConfig)
+	}
 	return nil
 }
 
-func (s *Server) Addr() string { return s.ln.Addr().String() }
+// Addr returns the plain listener's bound address ("" when disabled).
+func (s *Server) Addr() string {
+	if s.ln == nil {
+		return ""
+	}
+	return s.ln.Addr().String()
+}
 
-// Serve accepts connections until Close. Each connection gets its own
-// goroutine; reads run in parallel via the core's RWMutex, writes serialize.
+// TLSAddr returns the TLS listener's bound address ("" when TLS is off).
+func (s *Server) TLSAddr() string {
+	if s.tlsLn == nil {
+		return ""
+	}
+	return s.tlsLn.Addr().String()
+}
+
+// Serve accepts connections on every bound listener until Close. Each
+// connection gets its own goroutine; reads run in parallel via the core's
+// RWMutex, writes serialize. TLS connections are indistinguishable from
+// plain ones past the accept (the handshake happens on first read).
 func (s *Server) Serve() error {
 	if s.cfg.AutoCompact {
 		s.wg.Add(1)
 		go s.autoCompactLoop()
 	}
+	listeners := make([]net.Listener, 0, 2)
+	if s.ln != nil {
+		listeners = append(listeners, s.ln)
+	}
+	if s.tlsLn != nil {
+		listeners = append(listeners, s.tlsLn)
+	}
+	errc := make(chan error, len(listeners))
+	for _, ln := range listeners {
+		go func(ln net.Listener) { errc <- s.acceptLoop(ln) }(ln)
+	}
+	// The first accept-loop failure wins; a clean Close returns nil from
+	// every loop.
+	var first error
+	for range listeners {
+		if err := <-errc; err != nil && first == nil {
+			first = err
+			s.Close() // tear down the sibling listener too
+		}
+	}
+	return first
+}
+
+func (s *Server) acceptLoop(ln net.Listener) error {
 	for {
-		c, err := s.ln.Accept()
+		c, err := ln.Accept()
 		if err != nil {
 			if s.closed.Load() {
 				return nil // Close() shut the listener down
@@ -148,6 +210,9 @@ func (s *Server) Close() {
 	close(s.stop)
 	if s.ln != nil {
 		s.ln.Close()
+	}
+	if s.tlsLn != nil {
+		s.tlsLn.Close()
 	}
 	s.mu.Lock()
 	for c := range s.conns {
