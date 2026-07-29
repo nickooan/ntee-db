@@ -22,20 +22,48 @@ in order.
 ## Starting
 
 ```sh
-nteedb-server -schema schema.json                # 127.0.0.1:6740
-nteedb-server -schema schema.json -addr 0.0.0.0:6740 -auth s3cret
+nteedb-server -schema schema.json                # 127.0.0.1:6666
+nteedb-server -schema schema.json -addr 0.0.0.0:6666 -auth s3cret
 nteedb-server -schema schema.json -auth-file users.txt
+nteedb-server -schema schema.json -tls-cert cert.pem -tls-key key.pem  # + TLS on 127.0.0.1:6667
 ```
 
 | Flag | Meaning |
 | --- | --- |
 | `-schema <file>` | store definition (required, below) |
-| `-addr host:port` | listen address (default `127.0.0.1:6740`) |
+| `-addr host:port` | plain listener (default `127.0.0.1:6666`; `""` disables it — TLS-only) |
+| `-tls-addr host:port` | TLS listener (default `127.0.0.1:6667`; needs `-tls-cert`/`-tls-key`) |
+| `-tls-cert <file>` | PEM certificate (or chain) — enables the TLS listener |
+| `-tls-key <file>` | PEM private key for `-tls-cert` |
 | `-dir <path>` | store directory, overrides the schema's `dir` |
 | `-auth <password>` | shared password (or `NTEEDB_AUTH` env); grants admin |
 | `-auth-file <file>` | `user:password[:role]` lines; role `admin` or `user` (default) |
 | `-insecure` | allow a non-loopback bind without auth (trusted network) |
 | `-idle <dur>` | per-connection idle timeout (default `5m`, `0` disables) |
+
+### TLS
+
+With `-tls-cert`/`-tls-key`, the server runs a TLS listener (TLS ≥ 1.2) on
+`-tls-addr` **alongside** the plain one — same protocol, same store, same
+auth. For a TLS-only deployment, disable the plain listener with `-addr ""`:
+
+```sh
+nteedb-server -schema schema.json -addr "" \
+  -tls-addr 0.0.0.0:6667 -tls-cert cert.pem -tls-key key.pem -auth s3cret
+```
+
+A quick self-signed certificate for testing:
+
+```sh
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -keyout key.pem -out cert.pem -days 365 -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+```
+
+TLS encrypts the transport but authorizes nobody: **protected mode applies
+to the TLS listener too** — a non-loopback `-tls-addr` still requires
+`-auth`/`-auth-file` (or an explicit `-insecure`). Client certificates
+(mTLS) are not supported yet.
 
 The store allows a **single writer process** (kernel `flock`): if another
 process has the directory open, the server exits with a clear error at start.
@@ -165,7 +193,7 @@ Responses are one JSON line: `{"ok":true,"result":…}` on success,
 `{"ok":false,"err":"…"}` on failure. Try it with `nc`:
 
 ```
-$ nc 127.0.0.1 6740
+$ nc 127.0.0.1 6666
 ping
 {"ok":true,"result":"pong"}
 put call:1 {"kind":"request","ms":42}
@@ -272,7 +300,8 @@ index hint is written, so the next boot is fast).
 
 ## Future work
 
-Raw-framed `getr` for binary-heavy workloads, TLS, per-user ACLs, unix-domain
-socket listener, metrics endpoint, and a Go client package. (A batch `mput`
+Raw-framed `getr` for binary-heavy workloads, mTLS (client certificates),
+per-user ACLs, unix-domain socket listener, metrics endpoint, and a Go client
+package. (A batch `mput`
 was considered and dropped: pipelining already amortizes round-trips, and the
 one-fsync-per-batch benefit only matters under `syncEveryWrite`.)

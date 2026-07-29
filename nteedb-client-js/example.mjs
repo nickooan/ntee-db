@@ -2,12 +2,15 @@
 //
 //   go run ./nteedb-server -schema nteedb-server/schema.example.json -dir $(mktemp -d)
 //
-// then: node example.mjs  (NTEEDB_HOST / NTEEDB_PORT / NTEEDB_AUTH to override)
+// then: node example.mjs
+// (NTEEDB_HOST / NTEEDB_PORT / NTEEDB_AUTH / NTEEDB_TLS=1 to override;
+// the port defaults to 6666, or 6667 with NTEEDB_TLS=1)
 import { NteeClient } from "./src/index.js"
 
 const client = await NteeClient.connect({
   host: process.env.NTEEDB_HOST ?? "127.0.0.1",
-  port: Number(process.env.NTEEDB_PORT ?? 6740),
+  port: process.env.NTEEDB_PORT ? Number(process.env.NTEEDB_PORT) : undefined,
+  tls: process.env.NTEEDB_TLS === "1" ? true : undefined,
   auth: process.env.NTEEDB_AUTH,
 })
 console.log("connected:", client.info)

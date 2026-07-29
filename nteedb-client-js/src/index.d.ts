@@ -20,8 +20,14 @@ export type AuthCredentials = string | { user: string; password: string }
 export interface NteeClientOptions {
   /** Server host. Default "127.0.0.1". */
   host?: string
-  /** Server port. Default 6740 (the server's default -addr port). */
+  /** Server port. Defaults to 6667 when `tls` is set, 6666 otherwise —
+   * matching the server's default -tls-addr / -addr ports. */
   port?: number
+  /** Connect over TLS: `true` verifies against the system CAs; an object is
+   * passed through to node:tls connect ({ca, rejectUnauthorized,
+   * servername, cert, key, ...}) — e.g. {ca} for a self-signed server
+   * certificate. Omit for a plain TCP connection. */
+  tls?: boolean | import("node:tls").ConnectionOptions
   /** Authenticate during connect. Omit against auth-mode "none" servers, or
    * to connect unauthenticated and call auth() later (only hello/auth/quit
    * work before authentication). */

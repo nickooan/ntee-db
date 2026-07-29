@@ -636,15 +636,18 @@ func TestProtectedMode(t *testing.T) {
 		insecure bool
 		wantErr  bool
 	}{
-		{"127.0.0.1:6740", none, false, false},
-		{"localhost:6740", none, false, false},
-		{"0.0.0.0:6740", none, false, true},
-		{"192.168.1.5:6740", none, false, true},
-		{"0.0.0.0:6740", pw, false, false},
-		{"0.0.0.0:6740", none, true, false},
+		{"127.0.0.1:6666", none, false, false},
+		{"localhost:6666", none, false, false},
+		{"0.0.0.0:6666", none, false, true},
+		{"192.168.1.5:6666", none, false, true},
+		{"0.0.0.0:6666", pw, false, false},
+		{"0.0.0.0:6666", none, true, false},
 		{"no-port", none, false, true},
+		// The same rule guards the TLS listener (TLS ≠ auth).
+		{"0.0.0.0:6667", none, false, true},
+		{"127.0.0.1:6667", none, false, false},
 	} {
-		err := checkProtectedMode(tc.addr, tc.auth, tc.insecure)
+		err := checkProtectedMode("-addr", tc.addr, tc.auth, tc.insecure)
 		if (err != nil) != tc.wantErr {
 			t.Errorf("checkProtectedMode(%q, %s, insecure=%v): %v, wantErr=%v",
 				tc.addr, tc.auth.mode, tc.insecure, err, tc.wantErr)

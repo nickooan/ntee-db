@@ -60,7 +60,7 @@ go run ./nteedb-server -schema nteedb-server/schema.example.json
 ```
 
 ```
-$ nc 127.0.0.1 6740
+$ nc 127.0.0.1 6666
 put call:1 {"kind":"request"}
 {"ok":true,"result":true}
 ix kind request

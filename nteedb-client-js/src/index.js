@@ -1,8 +1,10 @@
-// Pure-JavaScript TCP client for nteedb-server. Zero runtime dependencies —
-// node:net plus the protocol helpers. One request line (or length-prefixed
-// frame) per command, one JSON response line per command, in order; the
-// client pipelines freely over a FIFO of pending resolvers.
+// Pure-JavaScript TCP/TLS client for nteedb-server. Zero runtime
+// dependencies — node:net / node:tls plus the protocol helpers. One request
+// line (or length-prefixed frame) per command, one JSON response line per
+// command, in order; the client pipelines freely over a FIFO of pending
+// resolvers.
 import net from "node:net"
+import tls from "node:tls"
 import {
   toStorable,
   assertToken,
@@ -92,15 +94,27 @@ export class NteeClient {
    * against an auth-requiring server, connect still succeeds (hello is
    * pre-auth); data commands fail with "auth required" until auth() is
    * called.
+   *
+   * TLS: pass `tls: true` (system CAs) or a node:tls options object
+   * ({ca, rejectUnauthorized, servername, ...}) to connect to the server's
+   * TLS listener. The port defaults to 6667 with TLS, 6666 without —
+   * matching the server's default -tls-addr / -addr.
    */
   static async connect({
     host = "127.0.0.1",
-    port = 6740,
+    tls: tlsOpts = undefined,
+    port = tlsOpts ? 6667 : 6666,
     auth = undefined,
     connectTimeout = 5000,
   } = {}) {
     const socket = await new Promise((resolve, reject) => {
-      const s = net.createConnection({ host, port })
+      const s = tlsOpts
+        ? tls.connect({
+            host,
+            port,
+            ...(tlsOpts === true ? {} : tlsOpts),
+          })
+        : net.createConnection({ host, port })
       const timer = setTimeout(() => {
         s.destroy()
         reject(
@@ -109,7 +123,8 @@ export class NteeClient {
           ),
         )
       }, connectTimeout)
-      s.once("connect", () => {
+      // A TLS socket is ready only after the handshake completes.
+      s.once(tlsOpts ? "secureConnect" : "connect", () => {
         clearTimeout(timer)
         resolve(s)
       })

@@ -8,11 +8,12 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { NteeClient } from "../src/index.js"
 
-const REPO_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-)
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const REPO_ROOT = path.resolve(HERE, "..", "..")
+
+// Test-only self-signed pair (see certs/README.md).
+export const TLS_CERT = path.join(HERE, "certs", "server.crt")
+export const TLS_KEY = path.join(HERE, "certs", "server.key")
 
 export const DEFAULT_INDEXES = [
   { name: "traceId", kind: "string" },
@@ -53,9 +54,11 @@ export function buildServer() {
 
 /**
  * Start a server on 127.0.0.1:0 with a fresh store.
- * opts: { indexes?, auth? (password string), authFile? (file contents) }.
- * Returns { host, port, stop } — stop() terminates the server and removes
- * the scratch dir.
+ * opts: { indexes?, auth? (password string), authFile? (file contents),
+ * tls? (true → also start a TLS listener on an ephemeral port using the
+ * committed test cert) }.
+ * Returns { host, port, tlsPort?, stop } — stop() terminates the server and
+ * removes the scratch dir.
  */
 export async function startServer(opts = {}) {
   const bin = await buildServer()
@@ -69,6 +72,16 @@ export async function startServer(opts = {}) {
     }),
   )
   const args = ["-schema", schemaPath, "-addr", "127.0.0.1:0"]
+  if (opts.tls) {
+    args.push(
+      "-tls-addr",
+      "127.0.0.1:0",
+      "-tls-cert",
+      TLS_CERT,
+      "-tls-key",
+      TLS_KEY,
+    )
+  }
   if (opts.auth) args.push("-auth", opts.auth)
   if (opts.authFile) {
     const authPath = path.join(dir, "users.txt")
@@ -78,7 +91,7 @@ export async function startServer(opts = {}) {
   const child = spawn(bin, args, { stdio: ["ignore", "ignore", "pipe"] })
 
   let stderrBuf = ""
-  const addr = await new Promise((resolve, reject) => {
+  const { addr, tlsAddr } = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       child.kill("SIGKILL")
       reject(
@@ -89,10 +102,13 @@ export async function startServer(opts = {}) {
     child.stderr.on("data", (chunk) => {
       stderrBuf += chunk
       const m = stderrBuf.match(/listening on (\S+)/)
-      if (m) {
-        clearTimeout(timer)
-        resolve(m[1])
-      }
+      if (!m) return
+      // With TLS the server logs a second line ("tls on <addr>") right
+      // after the plain one; wait for it so both ports are known.
+      const mt = opts.tls ? stderrBuf.match(/tls on (\S+)/) : null
+      if (opts.tls && !mt) return
+      clearTimeout(timer)
+      resolve({ addr: m[1], tlsAddr: mt?.[1] })
     })
     child.once("exit", (code) => {
       clearTimeout(timer)
@@ -101,10 +117,10 @@ export async function startServer(opts = {}) {
       )
     })
   })
-  const [host, port] = [
-    addr.slice(0, addr.lastIndexOf(":")),
-    Number(addr.slice(addr.lastIndexOf(":") + 1)),
-  ]
+  const portOf = (a) => Number(a.slice(a.lastIndexOf(":") + 1))
+  const host = addr.slice(0, addr.lastIndexOf(":"))
+  const port = portOf(addr)
+  const tlsPort = tlsAddr ? portOf(tlsAddr) : undefined
 
   let stopped = false
   async function stop() {
@@ -121,7 +137,7 @@ export async function startServer(opts = {}) {
     }
     await rm(dir, { recursive: true, force: true })
   }
-  return { host, port, stop, child }
+  return { host, port, tlsPort, stop, child }
 }
 
 /** Run fn against a fresh server, always stopping it afterwards. */

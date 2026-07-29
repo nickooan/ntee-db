@@ -17,6 +17,8 @@ just `node:net` and the standard library.
   `Buffer`.
 - Auth support for both server modes (shared password and user file), with
   role-aware errors.
+- **TLS** — connect to the server's TLS listener with one option (`tls`),
+  including custom CAs for self-signed deployments.
 - Typed (`src/index.d.ts`), ESM, Node ≥ 20.
 
 ## Install
@@ -39,7 +41,7 @@ go run ./nteedb-server -schema nteedb-server/schema.example.json -dir /tmp/nteed
 ```js
 import { NteeClient } from "ntee-db-client"
 
-const db = await NteeClient.connect({ host: "127.0.0.1", port: 6740 })
+const db = await NteeClient.connect({ host: "127.0.0.1", port: 6666 })
 console.log(db.info) // { server: "nteedb", version, auth, indexes: [...] }
 
 // KV — objects round-trip as parsed JSON.
@@ -65,7 +67,8 @@ await db.close()
 ```js
 await NteeClient.connect({
   host: "127.0.0.1", // default
-  port: 6740, // default (the server's default -addr port)
+  port: 6666, // default; 6667 when `tls` is set (the server's -addr / -tls-addr defaults)
+  tls: { ca }, // connect to the TLS listener (see below); omit for plain TCP
   auth: "s3cret", // password mode … or:
   auth: { user: "bob", password: "hunter2" }, // auth-file mode
   connectTimeout: 5000, // ms; guards the dial + handshake only
@@ -77,6 +80,29 @@ handshake; the result is exposed as `client.info`. Against an
 auth-requiring server without credentials, `connect()` still succeeds —
 `client.info.auth` tells you the mode, and data commands fail with
 `auth required` until you call `client.auth(...)`.
+
+### TLS
+
+The server runs a TLS listener when started with `-tls-cert`/`-tls-key`
+(default `127.0.0.1:6667`). Pass the `tls` option to use it:
+
+```js
+// Certificate signed by a public CA — verify against the system roots:
+await NteeClient.connect({ host: "db.example.com", tls: true })
+
+// Self-signed / private CA — pass the CA certificate:
+import { readFile } from "node:fs/promises"
+const ca = await readFile("cert.pem")
+await NteeClient.connect({ host: "10.0.0.5", tls: { ca }, auth: "s3cret" })
+
+// Skip verification (testing only — vulnerable to interception):
+await NteeClient.connect({ tls: { rejectUnauthorized: false } })
+```
+
+An object `tls` value is passed through to
+[`tls.connect`](https://nodejs.org/api/tls.html), so `servername`, client
+certificates, and every other node:tls option work as-is. With `tls` set,
+the default port becomes 6667.
 
 ## Values
 
@@ -157,8 +183,10 @@ error _and then the server closes the connection_ — treat it as fatal.
   `{"bin": true, "base64": "…"}` (exactly those two keys) is
   indistinguishable from the server's binary wrapper and decodes to a
   `Buffer`.
-- Plain TCP — no TLS. Run it on loopback or a trusted network (the server
-  refuses non-loopback binds without auth unless `-insecure`).
+- Use TLS (or loopback / a trusted network) in production — the plain
+  listener sends credentials and data in cleartext. The server refuses
+  non-loopback binds without auth unless `-insecure`, and that rule covers
+  its TLS listener too (TLS encrypts but does not authorize).
 
 ## Testing
 
