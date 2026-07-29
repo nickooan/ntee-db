@@ -3,6 +3,7 @@ package nteedb
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -491,4 +492,91 @@ func TestExtremeExpiryValues(t *testing.T) {
 	if !db.Has("far") {
 		t.Fatal("century TTL expired after a day")
 	}
+}
+
+// ---- benchmarks: the TTL feature's cost on the hot paths ----
+
+// BenchmarkPutTTL is BenchmarkPut plus a ttl argument: the extra cost is one
+// clock read plus the "exp" field in the marshaled record.
+func BenchmarkPutTTL(b *testing.B) {
+	db, err := Open(Options{Dir: b.TempDir()})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = db.Put(benchKey(i), []byte("value"), time.Hour)
+	}
+}
+
+// BenchmarkGetTTLLive reads keys that carry a (far-future) TTL — the lazy
+// expiry check is one integer compare per lookup.
+func BenchmarkGetTTLLive(b *testing.B) {
+	db, err := Open(Options{Dir: b.TempDir()})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	const n = 10000
+	for i := 0; i < n; i++ {
+		if err := db.Put(benchKey(i), []byte("value"), time.Hour); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _ = db.Get(benchKey(i % n))
+	}
+}
+
+// BenchmarkGetExpiredMiss measures the expired-hit path: the lazy check, the
+// miss, and the reaper enqueue (the reaper itself runs off this path). Keys
+// are kept expired by an injected clock; the reaper's deletes are real work
+// happening concurrently, as in production.
+func BenchmarkGetExpiredMiss(b *testing.B) {
+	real := nowMillis
+	defer func() { nowMillis = real }()
+	base := real()
+	nowMillis = func() int64 { return base }
+
+	db, err := Open(Options{Dir: b.TempDir()})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	const n = 10000
+	for i := 0; i < n; i++ {
+		if err := db.Put(benchKey(i), []byte("value"), time.Millisecond); err != nil {
+			b.Fatal(err)
+		}
+	}
+	nowMillis = func() int64 { return base + 10_000 } // everything expired
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _ = db.Get(benchKey(i % n))
+	}
+}
+
+// BenchmarkIncrTTL measures the in-place counter patch on a TTL'd counter —
+// the "exp" field rides along in the length check but only digits are written.
+func BenchmarkIncrTTL(b *testing.B) {
+	db, err := Open(Options{Dir: b.TempDir()})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Incr("c", 1, time.Hour); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := db.Incr("c", 1, time.Hour); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func benchKey(i int) string {
+	return fmt.Sprintf("key%07d", i)
 }
