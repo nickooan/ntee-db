@@ -1,0 +1,51 @@
+{
+  "name": "ntee-db-client",
+  "version": "0.1.0",
+  "description": "Pure-JavaScript TCP client for nteedb-server — zero runtime dependencies",
+  "license": "Apache-2.0",
+  "author": "nickooan <nickooan@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nickooan/ntee-db.git",
+    "directory": "nteedb-client-js"
+  },
+  "homepage": "https://github.com/nickooan/ntee-db/tree/main/nteedb-client-js#readme",
+  "bugs": {
+    "url": "https://github.com/nickooan/ntee-db/issues"
+  },
+  "keywords": [
+    "database",
+    "client",
+    "tcp",
+    "key-value",
+    "kv-store",
+    "secondary-index",
+    "counter",
+    "nteedb",
+    "zero-dependency",
+    "json"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "format": "prettier . --write",
+    "format:check": "prettier . --check",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "prettier": "^3.8.3"
+  }
+}

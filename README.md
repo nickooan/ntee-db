@@ -48,8 +48,10 @@ your app, in the same spirit as `lmdb` or SQLite in embedded mode.
 | [`nteedb-core/`](nteedb-core/)     | The store itself — a Go library (`package nteedb`). Full design & API docs in its [README](nteedb-core/README.md).                                                                        |
 | [`nteedb-js/`](nteedb-js/)         | [`ntee-db`](nteedb-js/README.md), the Node.js binding — the core compiled as a c-shared library (source in `nteedb-js/capi/`), loaded via FFI, shipped with prebuilt binaries.            |
 | [`nteedb-server/`](nteedb-server/) | A standalone TCP server (redis/memcached-style daemon): text protocol, single-line JSON responses, parallel reads, optional auth. Protocol docs in its [README](nteedb-server/README.md). |
+| [`nteedb-client-js/`](nteedb-client-js/) | [`ntee-db-client`](nteedb-client-js/README.md), a pure-JS TCP client for the server — every command, pipelining, zero runtime dependencies.                                          |
 
-(The JS binding stays server-free — it embeds the core directly.)
+(The JS binding stays server-free — it embeds the core directly; the JS
+client is its networked counterpart, talking to `nteedb-server` over TCP.)
 
 ## Running the server
 
@@ -161,6 +163,7 @@ go test -race ./...            # core + capi + server tests
 ./build.sh                     # server binaries (pure Go, cross-compiles)
 nteedb-js/capi/build.sh        # JS native libs (macOS host + Linux via Docker)
 cd nteedb-js && npm test       # Node binding tests
+cd nteedb-client-js && npm test # TCP client tests (spawns a real server; needs Go)
 ```
 
 ## License
