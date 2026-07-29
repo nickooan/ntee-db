@@ -117,6 +117,39 @@ func nteedb_incr(h C.uint, key *C.char, delta C.longlong) *C.char {
 	return reply(v, nil)
 }
 
+// nteedb_topup atomically adds up to amount (>= 0) to the counter at key,
+// clamped at max, returning how much of amount did not fit (0 = fully
+// applied).
+//
+//export nteedb_topup
+func nteedb_topup(h C.uint, key *C.char, amount C.longlong, max C.longlong) *C.char {
+	db := regGet(uint32(h))
+	if db == nil {
+		return reply(nil, errInvalidHandle)
+	}
+	over, err := db.Topup(C.GoString(key), int64(amount), int64(max))
+	if err != nil {
+		return reply(nil, err)
+	}
+	return reply(over, nil)
+}
+
+// nteedb_take atomically subtracts amount (>= 0) from the counter at key only
+// if the result stays >= left, returning whether it applied.
+//
+//export nteedb_take
+func nteedb_take(h C.uint, key *C.char, amount C.longlong, left C.longlong) *C.char {
+	db := regGet(uint32(h))
+	if db == nil {
+		return reply(nil, errInvalidHandle)
+	}
+	ok, err := db.Take(C.GoString(key), int64(amount), int64(left))
+	if err != nil {
+		return reply(nil, err)
+	}
+	return reply(ok, nil)
+}
+
 // valJSON is one value on the inline-JSON read path. A value that is valid JSON
 // is spliced verbatim into JSON (no escaping) so the JS envelope parse yields
 // the object directly; binary / non-JSON falls back to base64.

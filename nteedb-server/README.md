@@ -202,6 +202,8 @@ Values of `number`-kind indexes are parsed from the token (`ix status 200`).
 | `del <pk>` | Delete | `true` |
 | `incr <pk> [delta]` | Incr | new value as a JSON number (delta defaults to 1) |
 | `decr <pk> [delta]` | Incr | new value as a JSON number (delta defaults to 1) |
+| `topup <pk> <amount> <max>` | Topup | overflow as a JSON number: how much of `amount` didn't fit under `max` (0 = fully applied) |
+| `take <pk> <amount> <left>` | Take | `true` if applied (result stayed ≥ left), `false` if refused — value untouched |
 | `rml <cutoff>` | RemoveByPkLess | count of deleted keys (`< cutoff`) |
 | `rmg <cutoff>` | RemoveByPkGreater | count of deleted keys (`> cutoff`) |
 
@@ -210,7 +212,20 @@ initializes to 0 before the delta applies, so `incr hits 0` reads a counter
 (creating it at 0 if absent). `incr`/`decr` on a key holding any non-counter
 value fails with `key holds a non-counter value`; pushing past the int64 range
 fails with `counter overflows int64` and leaves the value unchanged. A `put`
-on a counter key demotes it to a plain value. Counters never appear in
+on a counter key demotes it to a plain value.
+
+`topup` and `take` are bounded updates for quota/stock patterns — the bound
+check and the write are one atomic operation, so concurrent clients can
+never overshoot. `topup q 5 100` fills the counter toward 100 and answers
+the overflow: at 98 it becomes 100 and answers `3`, at 90 it becomes 95 and
+answers `0` — check `== 0` for "the full amount fit" (a counter already at
+or above max is left unchanged and the whole amount comes back). `take s 10
+0` is all-or-nothing: it subtracts 10 only if the result stays ≥ 0 and
+answers `true`/`false`. An operation that changes nothing writes nothing (a
+missing key counts as 0 and is only created when something is added). The
+amount must be non-negative (`amount must be non-negative` otherwise);
+arithmetic that would leave the int64 range clamps (`topup`) or refuses
+(`take`) rather than erroring. Counters never appear in
 secondary indexes (they are primary-key-only, like every immediate value) and
 are stored fixed-width (sign + 19 digits), so increments rewrite bytes in
 place instead of growing the log; plain `get` therefore returns the raw

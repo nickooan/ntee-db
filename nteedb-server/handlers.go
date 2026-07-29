@@ -256,6 +256,35 @@ func (s *Server) dispatch(rw respWriter, r *bufio.Reader, line []byte, st *connS
 		}
 		return false, rw.ok(v)
 
+	case "topup", "take":
+		bound := "max"
+		if cmd == "take" {
+			bound = "left"
+		}
+		if len(args) != 3 {
+			return false, rw.fail("usage: %s <pk> <amount> <%s>", cmd, bound)
+		}
+		amount, err := strconv.ParseInt(args[1], 10, 64)
+		if err != nil {
+			return false, rw.fail("%s: amount must be an integer, got %q", cmd, args[1])
+		}
+		limit, err := strconv.ParseInt(args[2], 10, 64)
+		if err != nil {
+			return false, rw.fail("%s: %s must be an integer, got %q", cmd, bound, args[2])
+		}
+		if cmd == "topup" {
+			over, err := s.db.Topup(args[0], amount, limit)
+			if err != nil {
+				return false, rw.fail("%v", err)
+			}
+			return false, rw.ok(over)
+		}
+		applied, err := s.db.Take(args[0], amount, limit)
+		if err != nil {
+			return false, rw.fail("%v", err)
+		}
+		return false, rw.ok(applied)
+
 	case "del":
 		if len(args) != 1 {
 			return false, rw.fail("usage: del <pk>")

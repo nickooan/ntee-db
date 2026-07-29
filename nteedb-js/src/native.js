@@ -61,6 +61,8 @@ export const fns = {
   destroy: def("nteedb_destroy", ["str"]),
   put: def("nteedb_put", ["uint", "str", "void *", "int", "str"]),
   incr: def("nteedb_incr", ["uint", "str", "int64"]),
+  topup: def("nteedb_topup", ["uint", "str", "int64", "int64"]),
+  take: def("nteedb_take", ["uint", "str", "int64", "int64"]),
   putBatch: def("nteedb_put_batch", ["uint", "str"]),
   putBatchBin: def("nteedb_put_batch_bin", ["uint", "str", "void *", "int"]),
   getJson: def("nteedb_get_json", ["uint", "str"]),

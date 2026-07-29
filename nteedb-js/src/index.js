@@ -111,6 +111,40 @@ export class NteeDB {
   }
 
   /**
+   * Atomically add up to `amount` (>= 0) to the counter at `key`, clamped so
+   * the value never exceeds `max`; resolve to how much of `amount` did NOT
+   * fit — 0 means the full amount applied, a positive overflow means the
+   * counter filled to `max` (or was already at/above it, in which case it is
+   * left unchanged) with that many units left over. A missing key counts as
+   * 0 and is created when anything is added. The clamp and the add are one
+   * atomic operation. Rejects on a non-counter value or a negative amount;
+   * see incr() for the remaining counter semantics. Arguments must be safe
+   * integers.
+   */
+  topup(key, amount, max) {
+    this.#assertOpen()
+    if (!Number.isSafeInteger(amount) || !Number.isSafeInteger(max))
+      throw new TypeError("nteedb: amount and max must be safe integers")
+    return callAsync(fns.topup, this.#h, key, amount, max)
+  }
+
+  /**
+   * Atomically subtract `amount` (>= 0) from the counter at `key` only if the
+   * result stays >= `left`; resolve true iff it applied — topup()'s opposite,
+   * for quota/stock draining without a check-then-write race. A missing key
+   * counts as 0 (a refused take writes nothing). Rejects on a non-counter
+   * value or a negative amount. Arguments must be safe integers.
+   */
+  take(key, amount, left) {
+    this.#assertOpen()
+    if (!Number.isSafeInteger(amount) || !Number.isSafeInteger(left))
+      throw new TypeError("nteedb: amount and left must be safe integers")
+    return callAsync(fns.take, this.#h, key, amount, left).then(
+      (r) => r === true,
+    )
+  }
+
+  /**
    * Append many records in one batch — the bulk counterpart to put() for
    * imports and other high-volume writes: one FFI crossing, one lock, one
    * fsync in durable mode. Items are applied in array order (a repeated key's

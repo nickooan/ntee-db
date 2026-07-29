@@ -214,6 +214,8 @@ if (Buffer.isBuffer(v)) {
 | `put(key, value, ix?)`                                        | `void`                                     | `value`: object\|string\|Buffer (object → JSON); `ix`: `{name: string\|number}`  |
 | `putMany(items)`                                              | `Promise<number>`                          | one batch off the event loop; in-order; all-or-nothing validation                |
 | `incr(key, delta?)` / `decr(key, delta?)`                     | `Promise<number>`                          | atomic int64 counter; delta defaults to 1; resolves to the new value; **async**  |
+| `topup(key, amount, max)`                                     | `Promise<number>`                          | fill toward `max`; resolves to the overflow that didn't fit (0 = fully applied); **async** |
+| `take(key, amount, left)`                                     | `Promise<boolean>`                         | subtract only if the result stays ≥ `left`; true iff applied; **async**          |
 | `get(key)`                                                    | `Promise<value \| null>`                   | the stored JSON parsed (a Buffer for binary/non-JSON); **async** (off the loop)  |
 | `getMany(keys)`                                               | `Promise<(value\|null)[]>`                 | batched get, one crossing, aligned to `keys`; **async** (off the event loop)     |
 | `has(key)`                                                    | `Promise<boolean>`                         | **async** (off the loop)                                                         |
@@ -236,7 +238,17 @@ if (Buffer.isBuffer(v)) {
   are primary-key-only (never in secondary indexes) and are updated **in
   place** — a hot counter never grows the log. Deltas must be safe integers;
   counter values beyond ±2^53 lose precision as JS numbers (the store itself
-  keeps full int64 precision).
+  keeps full int64 precision). `topup(key, amount, max)` and
+  `take(key, amount, left)` are bounded updates for quota/stock patterns —
+  the bound check and the write are one atomic operation, so concurrent
+  callers can never overshoot. `topup` fills the counter toward `max` and
+  resolves to the overflow that didn't fit (0 = the full amount applied; a
+  counter already at/above max is left unchanged). `take` is all-or-nothing:
+  it subtracts `amount` only if the result stays ≥ `left` and resolves
+  `true` iff applied. An operation that changes nothing writes nothing; the
+  amount must be non-negative. These require a native library built from a
+  version that exports them — rebuild via `capi/build.sh` if loading a
+  locally built library.
 - **Only JSON-object values can be indexed**: immediate values — strings,
   numbers, booleans, arrays, binary — are plain key:value pairs addressed by
   primary key alone. Supplying `ix` with one throws, and `jsonPath` extraction

@@ -101,6 +101,24 @@ export declare class NteeDB {
    */
   decr(key: string, delta?: number): Promise<number>
   /**
+   * Atomically add up to `amount` (>= 0) to the counter at `key`, clamped so
+   * the value never exceeds `max`; resolves to how much of `amount` did NOT
+   * fit — 0 means fully applied, a positive overflow means the counter
+   * filled to `max` (or was already at/above it and is left unchanged) with
+   * that many units left over. A missing key counts as 0 and is created when
+   * anything is added. Rejects on a non-counter value or a negative amount.
+   * Arguments must be safe integers.
+   */
+  topup(key: string, amount: number, max: number): Promise<number>
+  /**
+   * Atomically subtract `amount` (>= 0) from the counter at `key` only if the
+   * result stays >= `left`; resolves true iff it applied — topup()'s opposite,
+   * for quota/stock draining without a check-then-write race. A missing key
+   * counts as 0 (a refused take writes nothing). Rejects on a non-counter
+   * value or a negative amount. Arguments must be safe integers.
+   */
+  take(key: string, amount: number, left: number): Promise<boolean>
+  /**
    * Append many records in one batch (one FFI crossing, one lock, one fsync in
    * durable mode). Applied in array order; an invalid item rejects the whole
    * batch with nothing written. Runs off the event loop; resolves to the
