@@ -8,13 +8,18 @@ import (
 
 // pkEntry locates a key's latest record within the main log and carries the
 // key's current secondary-index values (for retraction on overwrite/delete and
-// for hint snapshots — there is no separate key→ix map).
+// for hint snapshots — there is no separate key→ix map) plus its optional
+// expiry, so the lazy TTL check at lookup never touches disk.
 type pkEntry struct {
 	key string
 	off int64
 	n   int32
 	ix  map[string]any // current secondary-index values; nil when none
+	exp int64          // unix-ms expiry mirrored from the record; 0 = no TTL
 }
+
+// expiredAt reports whether the entry carries a TTL that has passed.
+func (e pkEntry) expiredAt(now int64) bool { return e.exp != 0 && e.exp <= now }
 
 // pkIndex is the in-memory primary-key index: a counted copy-on-write B-tree
 // ordered by key. Insert/delete/lookup are O(log n) regardless of key order,
@@ -42,7 +47,10 @@ func (ix *pkIndex) get(key string) (pkEntry, bool) {
 }
 
 // upsert inserts e, or updates an existing key's record location in place,
-// preserving the entry's current ix (which only refreshSec rewrites).
+// preserving the entry's current ix (which only refreshSec rewrites). exp is
+// deliberately NOT inherited: every write supplies it from the record just
+// appended, so a plain Put clears a TTL (Redis SET semantics) and a
+// TTL-carrying write replaces it.
 func (ix *pkIndex) upsert(e pkEntry) {
 	if prev, ok := ix.tree.Get(e); ok {
 		e.ix = prev.ix

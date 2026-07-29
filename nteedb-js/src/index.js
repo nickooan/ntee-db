@@ -17,6 +17,16 @@ function toStorable(value) {
   return JSON.stringify(value)
 }
 
+// Normalize an optional ttlMs argument for the FFI layer: undefined → 0
+// (no TTL); anything else must be a positive safe integer.
+function ttlArg(ttlMs) {
+  if (ttlMs === undefined) return 0
+  if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
+    throw new TypeError("nteedb: ttlMs must be a positive safe integer")
+  }
+  return ttlMs
+}
+
 // Decode one element of the inline-JSON read envelope: a parsed JSON value
 // (already an object/array/scalar from the single envelope parse), a Buffer for
 // a binary/non-JSON value ("v"), or null when the key is absent. A found value
@@ -70,13 +80,17 @@ export class NteeDB {
    * Store a value under key, with optional secondary index values. An object,
    * array, or scalar is JSON-serialized automatically; a string or Buffer is
    * stored as-is (Buffer for raw/binary content).
+   *
+   * ttlMs (optional, positive integer) gives the key a time-to-live: once it
+   * elapses the key reads as missing and is lazily deleted. A put WITHOUT a
+   * ttl clears any existing TTL (the write replaces the record wholesale).
    */
-  put(key, value, ix) {
+  put(key, value, ix, ttlMs) {
     this.#assertOpen()
     const v = toStorable(value)
     const buf = Buffer.isBuffer(v) ? v : Buffer.from(v)
     const ixJSON = ix ? JSON.stringify(ix) : ""
-    readEnvelope(fns.put(this.#h, key, buf, buf.length, ixJSON))
+    readEnvelope(fns.put(this.#h, key, buf, buf.length, ixJSON, ttlArg(ttlMs)))
   }
 
   /**
@@ -90,24 +104,30 @@ export class NteeDB {
    * increments update the record in place — a hot counter never grows the log.
    * Deltas must be safe integers (|delta| ≤ 2^53-1); counter values beyond
    * that range lose precision as JS numbers.
+   *
+   * ttlMs (optional) applies ONLY when this call creates the key — a live
+   * counter keeps its original deadline, and an expired one restarts from 0
+   * with the new ttl. incr(w, 1, 60000) is a complete fixed-window rate
+   * limiter: the first request arms the window, requests count within it,
+   * and the window restarts once it lapses.
    */
-  incr(key, delta = 1) {
+  incr(key, delta = 1, ttlMs) {
     this.#assertOpen()
     if (!Number.isSafeInteger(delta))
       throw new TypeError("nteedb: delta must be a safe integer")
-    return callAsync(fns.incr, this.#h, key, delta)
+    return callAsync(fns.incr, this.#h, key, delta, ttlArg(ttlMs))
   }
 
   /**
    * Atomically subtract `delta` (default 1) from the counter at `key` and
    * resolve to the new value — incr() with a negated delta; see incr() for
-   * counter semantics.
+   * counter and ttl semantics.
    */
-  decr(key, delta = 1) {
+  decr(key, delta = 1, ttlMs) {
     this.#assertOpen()
     if (!Number.isSafeInteger(delta))
       throw new TypeError("nteedb: delta must be a safe integer")
-    return callAsync(fns.incr, this.#h, key, -delta)
+    return callAsync(fns.incr, this.#h, key, -delta, ttlArg(ttlMs))
   }
 
   /**
@@ -121,11 +141,11 @@ export class NteeDB {
    * see incr() for the remaining counter semantics. Arguments must be safe
    * integers.
    */
-  topup(key, amount, max) {
+  topup(key, amount, max, ttlMs) {
     this.#assertOpen()
     if (!Number.isSafeInteger(amount) || !Number.isSafeInteger(max))
       throw new TypeError("nteedb: amount and max must be safe integers")
-    return callAsync(fns.topup, this.#h, key, amount, max)
+    return callAsync(fns.topup, this.#h, key, amount, max, ttlArg(ttlMs))
   }
 
   /**
@@ -135,11 +155,11 @@ export class NteeDB {
    * counts as 0 (a refused take writes nothing). Rejects on a non-counter
    * value or a negative amount. Arguments must be safe integers.
    */
-  take(key, amount, left) {
+  take(key, amount, left, ttlMs) {
     this.#assertOpen()
     if (!Number.isSafeInteger(amount) || !Number.isSafeInteger(left))
       throw new TypeError("nteedb: amount and left must be safe integers")
-    return callAsync(fns.take, this.#h, key, amount, left).then(
+    return callAsync(fns.take, this.#h, key, amount, left, ttlArg(ttlMs)).then(
       (r) => r === true,
     )
   }

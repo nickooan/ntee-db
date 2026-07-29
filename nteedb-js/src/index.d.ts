@@ -78,11 +78,17 @@ export declare class NteeDB {
    * index values require the value to be a JSON object — immediate values
    * (strings, numbers, booleans, arrays, binary) are primary-key-only and
    * rejected with an error when `ix` is supplied.
+   *
+   * `ttlMs` (optional, positive integer) gives the key a time-to-live: once
+   * it elapses the key reads as missing and is lazily deleted. A put WITHOUT
+   * a ttl clears any existing TTL. Secondary indexes are TTL-unaware — an
+   * expired key may appear in secIndex* results until its cleanup runs.
    */
   put(
     key: string,
     value: Value,
     ix?: { [index: string]: string | number },
+    ttlMs?: number,
   ): void
 
   /**
@@ -93,13 +99,17 @@ export declare class NteeDB {
    * are primary-key-only (never in secondary indexes) and update in place — a
    * hot counter never grows the log. `delta` must be a safe integer; counter
    * values beyond ±2^53 lose precision as JS numbers.
+   *
+   * `ttlMs` (optional) applies ONLY when this call creates the key — a live
+   * counter keeps its deadline, an expired one restarts from 0 with the new
+   * ttl. `incr(w, 1, 60000)` is a complete fixed-window rate limiter.
    */
-  incr(key: string, delta?: number): Promise<number>
+  incr(key: string, delta?: number, ttlMs?: number): Promise<number>
   /**
    * Atomically subtract `delta` (default 1) from the counter at `key`;
    * resolves to the new value. Same semantics as incr() with a negated delta.
    */
-  decr(key: string, delta?: number): Promise<number>
+  decr(key: string, delta?: number, ttlMs?: number): Promise<number>
   /**
    * Atomically add up to `amount` (>= 0) to the counter at `key`, clamped so
    * the value never exceeds `max`; resolves to how much of `amount` did NOT
@@ -109,7 +119,12 @@ export declare class NteeDB {
    * anything is added. Rejects on a non-counter value or a negative amount.
    * Arguments must be safe integers.
    */
-  topup(key: string, amount: number, max: number): Promise<number>
+  topup(
+    key: string,
+    amount: number,
+    max: number,
+    ttlMs?: number,
+  ): Promise<number>
   /**
    * Atomically subtract `amount` (>= 0) from the counter at `key` only if the
    * result stays >= `left`; resolves true iff it applied — topup()'s opposite,
@@ -117,7 +132,12 @@ export declare class NteeDB {
    * counts as 0 (a refused take writes nothing). Rejects on a non-counter
    * value or a negative amount. Arguments must be safe integers.
    */
-  take(key: string, amount: number, left: number): Promise<boolean>
+  take(
+    key: string,
+    amount: number,
+    left: number,
+    ttlMs?: number,
+  ): Promise<boolean>
   /**
    * Append many records in one batch (one FFI crossing, one lock, one fsync in
    * durable mode). Applied in array order; an invalid item rejects the whole

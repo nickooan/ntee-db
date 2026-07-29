@@ -546,6 +546,65 @@ test("topup/take: guarded counters", async () => {
   })
 })
 
+// Poll until fn() is truthy or ~2s pass (TTL tests use small real ttls).
+async function eventually(fn) {
+  const deadline = Date.now() + 2000
+  while (Date.now() < deadline) {
+    if (await fn()) return true
+    await new Promise((r) => setTimeout(r, 5))
+  }
+  return false
+}
+
+test("ttl: keys expire lazily; plain put clears the ttl", async () => {
+  await withDB({}, async (db) => {
+    db.put("eph", { a: 1 }, undefined, 40)
+    db.put("stay", { b: 2 })
+    assert.deepEqual(await db.get("eph"), { a: 1 })
+    assert.ok(
+      await eventually(async () => (await db.get("eph")) === null),
+      "ttl key never expired",
+    )
+    assert.equal(await db.has("stay"), true)
+
+    // put without a ttl clears a pending one.
+    db.put("k", "v1", undefined, 40)
+    db.put("k", "v2")
+    await new Promise((r) => setTimeout(r, 80))
+    assert.equal((await db.get("k")).toString(), "v2")
+
+    // Validation is synchronous.
+    assert.throws(() => db.put("x", "v", undefined, 0), TypeError)
+    assert.throws(() => db.put("x", "v", undefined, -5), TypeError)
+    assert.throws(() => db.incr("x", 1, 1.5), TypeError)
+  })
+})
+
+test("ttl: fixed-window counter restarts after expiry", async () => {
+  await withDB({}, async (db) => {
+    assert.equal(await db.incr("w", 1, 60), 1) // arms a 60ms window
+    assert.equal(await db.incr("w", 1, 60), 2) // ttl ignored on a live key
+    assert.ok(
+      await eventually(async () => (await db.incr("w", 1, 60)) === 1),
+      "window never restarted",
+    )
+  })
+})
+
+test("ttl: topup/take create-only ttl", async () => {
+  await withDB({}, async (db) => {
+    assert.equal(await db.topup("b", 5, 10, 50), 0) // creates with ttl
+    assert.equal(await db.take("b", 2, 0), true)
+    assert.ok(
+      await eventually(async () => (await db.take("b", 1, 0)) === false),
+      "bucket never expired",
+    )
+    // Recreate after expiry with a fresh ttl.
+    assert.equal(await db.topup("b", 3, 10, 50), 0)
+    assert.equal(await db.incr("b", 0), 3)
+  })
+})
+
 test("counters persist across close/reopen", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "nteedb-"))
   try {

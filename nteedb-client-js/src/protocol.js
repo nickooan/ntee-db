@@ -82,16 +82,44 @@ export function buildPut(key, valueBuf) {
 /**
  * Build the putx frame (indexed put — always length-prefixed):
  *
- *   putx <key> <ixbytes> <nbytes>\r\n
+ *   putx <key> <ixbytes> <nbytes> [ttlms]\r\n
  *   <index-values JSON object>\r\n
  *   <value bytes>\r\n
  */
-export function buildPutx(key, ixBuf, valueBuf) {
+export function buildPutx(key, ixBuf, valueBuf, ttlMs = 0) {
+  const ttl = ttlMs > 0 ? ` ${ttlMs}` : ""
   return Buffer.concat([
-    Buffer.from(`putx ${key} ${ixBuf.length} ${valueBuf.length}\r\n`),
+    Buffer.from(`putx ${key} ${ixBuf.length} ${valueBuf.length}${ttl}\r\n`),
     ixBuf,
     CRLF,
     valueBuf,
     CRLF,
   ])
+}
+
+/**
+ * Build the putex frame — the framed put with a time-to-live (a trailing TTL
+ * on plain `put` would be ambiguous with its inline form on the wire):
+ *
+ *   putex <key> <ttlms> <nbytes>\r\n
+ *   <value bytes>\r\n
+ */
+export function buildPutex(key, ttlMs, valueBuf) {
+  return Buffer.concat([
+    Buffer.from(`putex ${key} ${ttlMs} ${valueBuf.length}\r\n`),
+    valueBuf,
+    CRLF,
+  ])
+}
+
+/**
+ * Normalize an optional ttlMs argument: undefined → 0 (no TTL); anything
+ * else must be a positive safe integer number of milliseconds.
+ */
+export function ttlArg(ttlMs) {
+  if (ttlMs === undefined) return 0
+  if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
+    throw new TypeError("nteedb: ttlMs must be a positive safe integer")
+  }
+  return ttlMs
 }

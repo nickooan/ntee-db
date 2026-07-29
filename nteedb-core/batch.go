@@ -1,12 +1,16 @@
 package nteedb
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // PutItem is one record in a PutBatch call.
 type PutItem struct {
 	Key   string
 	Value []byte
-	IX    IndexValues // optional explicit secondary-index values
+	IX    IndexValues   // optional explicit secondary-index values
+	TTL   time.Duration // optional time-to-live; 0 = none (negative is an error)
 }
 
 // PutBatch applies items in array order under a single lock acquisition — the
@@ -35,6 +39,7 @@ func (db *DB) PutBatch(items []PutItem) error {
 	// EXISTING full group. Items within one batch may still evict each other —
 	// that is normal retention (the cap keeps the highest keys of the batch).
 	ixs := make([]map[string]any, len(items))
+	exps := make([]int64, len(items))
 	for i, it := range items {
 		ix, err := db.buildIndexValues(it.Key, it.Value, it.IX)
 		if err != nil {
@@ -43,12 +48,18 @@ func (db *DB) PutBatch(items []PutItem) error {
 		if err := db.checkSelfEviction(it.Key, ix); err != nil {
 			return fmt.Errorf("nteedb: batch item %d: %w", i, err)
 		}
+		if it.TTL < 0 {
+			return fmt.Errorf("nteedb: batch item %d (%q): %w", i, it.Key, ErrInvalidTTL)
+		}
+		if it.TTL > 0 {
+			exps[i] = nowMillis() + it.TTL.Milliseconds()
+		}
 		ixs[i] = ix
 	}
 
 	// Pass 2 — append in order, without per-write fsyncs.
 	for i, it := range items {
-		if err := db.appendRecord(it.Key, it.Value, ixs[i], false, false); err != nil {
+		if err := db.appendRecord(it.Key, it.Value, ixs[i], exps[i], false, false); err != nil {
 			return fmt.Errorf("nteedb: batch item %d (%q): %w", i, it.Key, err)
 		}
 	}

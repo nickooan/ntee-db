@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"time"
 	"unsafe"
 
 	nteedb "github.com/nickooan/ntee-db/nteedb-core"
@@ -82,8 +83,18 @@ func nteedb_destroy(dir *C.char) *C.char {
 	return reply(nil, nteedb.Destroy(C.GoString(dir)))
 }
 
+// ttlArg maps an optional ttlMillis FFI param onto the core's variadic ttl
+// tail: 0 = no TTL; anything else (including invalid negatives, which the
+// core rejects with ErrInvalidTTL) is passed through.
+func ttlArg(ms C.longlong) []time.Duration {
+	if ms == 0 {
+		return nil
+	}
+	return []time.Duration{time.Duration(ms) * time.Millisecond}
+}
+
 //export nteedb_put
-func nteedb_put(h C.uint, key *C.char, val *C.uchar, valLen C.int, ixJSON *C.char) *C.char {
+func nteedb_put(h C.uint, key *C.char, val *C.uchar, valLen C.int, ixJSON *C.char, ttlMillis C.longlong) *C.char {
 	db := regGet(uint32(h))
 	if db == nil {
 		return reply(nil, errInvalidHandle)
@@ -91,26 +102,27 @@ func nteedb_put(h C.uint, key *C.char, val *C.uchar, valLen C.int, ixJSON *C.cha
 	value := C.GoBytes(unsafe.Pointer(val), valLen)
 	ixStr := C.GoString(ixJSON)
 	if ixStr == "" {
-		return reply(nil, db.Put(C.GoString(key), value))
+		return reply(nil, db.Put(C.GoString(key), value, ttlArg(ttlMillis)...))
 	}
 	var ix map[string]any
 	if err := json.Unmarshal([]byte(ixStr), &ix); err != nil {
 		return reply(nil, err)
 	}
-	return reply(nil, db.PutIndexed(C.GoString(key), value, ix))
+	return reply(nil, db.PutIndexed(C.GoString(key), value, ix, ttlArg(ttlMillis)...))
 }
 
 // nteedb_incr atomically adds delta (negative to decrement) to the int64
 // counter at key, returning the new value. The JS wrapper's decr is this with
-// a negated delta.
+// a negated delta. ttlMillis (0 = none) applies only when the call creates
+// the key.
 //
 //export nteedb_incr
-func nteedb_incr(h C.uint, key *C.char, delta C.longlong) *C.char {
+func nteedb_incr(h C.uint, key *C.char, delta C.longlong, ttlMillis C.longlong) *C.char {
 	db := regGet(uint32(h))
 	if db == nil {
 		return reply(nil, errInvalidHandle)
 	}
-	v, err := db.Incr(C.GoString(key), int64(delta))
+	v, err := db.Incr(C.GoString(key), int64(delta), ttlArg(ttlMillis)...)
 	if err != nil {
 		return reply(nil, err)
 	}
@@ -119,15 +131,15 @@ func nteedb_incr(h C.uint, key *C.char, delta C.longlong) *C.char {
 
 // nteedb_topup atomically adds up to amount (>= 0) to the counter at key,
 // clamped at max, returning how much of amount did not fit (0 = fully
-// applied).
+// applied). ttlMillis (0 = none) applies only on create.
 //
 //export nteedb_topup
-func nteedb_topup(h C.uint, key *C.char, amount C.longlong, max C.longlong) *C.char {
+func nteedb_topup(h C.uint, key *C.char, amount C.longlong, max C.longlong, ttlMillis C.longlong) *C.char {
 	db := regGet(uint32(h))
 	if db == nil {
 		return reply(nil, errInvalidHandle)
 	}
-	over, err := db.Topup(C.GoString(key), int64(amount), int64(max))
+	over, err := db.Topup(C.GoString(key), int64(amount), int64(max), ttlArg(ttlMillis)...)
 	if err != nil {
 		return reply(nil, err)
 	}
@@ -135,15 +147,16 @@ func nteedb_topup(h C.uint, key *C.char, amount C.longlong, max C.longlong) *C.c
 }
 
 // nteedb_take atomically subtracts amount (>= 0) from the counter at key only
-// if the result stays >= left, returning whether it applied.
+// if the result stays >= left, returning whether it applied. ttlMillis
+// (0 = none) applies only on create.
 //
 //export nteedb_take
-func nteedb_take(h C.uint, key *C.char, amount C.longlong, left C.longlong) *C.char {
+func nteedb_take(h C.uint, key *C.char, amount C.longlong, left C.longlong, ttlMillis C.longlong) *C.char {
 	db := regGet(uint32(h))
 	if db == nil {
 		return reply(nil, errInvalidHandle)
 	}
-	ok, err := db.Take(C.GoString(key), int64(amount), int64(left))
+	ok, err := db.Take(C.GoString(key), int64(amount), int64(left), ttlArg(ttlMillis)...)
 	if err != nil {
 		return reply(nil, err)
 	}

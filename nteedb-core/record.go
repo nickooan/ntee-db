@@ -44,7 +44,12 @@ type blobRef struct {
 // Version skew: binaries older than the "c" field see a plain 20-char string
 // value; their Compact would drop the flag (same posture as the "s" note).
 //
-// The JSON keys are kept short ("k","s","v","b","del","c") because every
+// Exp, when non-zero, is the key's expiry as unix milliseconds: past that
+// instant the key reads as missing (lazy TTL — see pkGetLive). Version skew:
+// binaries older than the "exp" field treat such records as immortal and
+// their Compact would drop the stamp (same posture as the "s"/"c" notes).
+//
+// The JSON keys are kept short ("k","s","v","b","del","c","exp") because every
 // record is written to disk; omitempty keeps small records compact.
 type record struct {
 	Key     string         `json:"k"`
@@ -52,8 +57,9 @@ type record struct {
 	Value   []byte         `json:"v,omitempty"` // inline value, binary: base64 in JSON
 	Blob    *blobRef       `json:"b,omitempty"` // set when value is stored as a blob
 	Deleted bool           `json:"del,omitempty"`
-	IX      map[string]any `json:"ix,omitempty"` // secondary index values for this key
-	Counter bool           `json:"c,omitempty"`  // value is a fixed-width int64 counter (see Incr)
+	IX      map[string]any `json:"ix,omitempty"`  // secondary index values for this key
+	Counter bool           `json:"c,omitempty"`   // value is a fixed-width int64 counter (see Incr)
+	Exp     int64          `json:"exp,omitempty"` // unix-ms expiry; 0 = no TTL (kept last: layout stays prefix-identical)
 }
 
 // isTombstone reports whether the record deletes its key.

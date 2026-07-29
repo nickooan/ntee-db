@@ -282,6 +282,44 @@ that would leave the int64 range never errors: `Topup` just clamps at max,
 and a `Take` difference past `MinInt64` is below every left bound, so it
 refuses.
 
+### TTL (lazy per-key expiry)
+
+Every write op takes an optional trailing `ttl`:
+
+```go
+db.Put("session:9", data, 30*time.Minute)          // ephemeral value
+db.PutIndexed("call:1", v, ix, time.Hour)          // indexed + ttl
+v, err := db.Incr("rl:user1", 1, time.Minute)      // fixed-window rate limiter
+ok, err := db.Take("bucket", 1, 0, time.Minute)    // ttl on create only
+```
+
+Expiry lives **only in the primary-key index**: an optional unix-ms stamp on
+the record, mirrored into the in-memory entry, so the check at lookup costs
+nothing and secondary indexes stay TTL-unaware. Enforcement is **lazy** — a
+read that hits an expired key reports it missing and hands it to a
+background reaper (batched tombstone + retraction, off the read path);
+nothing ever scans for expired keys, and `Compact`/`Reindex` drop leftovers
+as they rewrite.
+
+Semantics: a `Put` **without** a ttl clears any existing one (the write
+replaces the record wholesale, Redis SET style). Counter ops are different:
+they **never touch a live counter's TTL in either direction** — omitting
+the ttl does NOT clear it (unlike `Put`), and passing one on a live counter
+is ignored (create-only; a window's deadline never slides under traffic).
+An **expired** counter is deleted inline and recreated fresh by the next
+op, and only then does the ttl argument decide: with it the new window is
+armed, without it the recreated counter is **immortal**. So for expiring
+windows and buckets the idiom is to pass the ttl on every call —
+`Incr(w, 1, time.Minute)` is a complete fixed-window rate limiter: it arms
+the window on the first request, is a no-op on the deadline while the
+window lives, and restarts at 1 with a fresh window after it lapses. A
+non-positive or repeated ttl argument returns `ErrInvalidTTL`.
+
+Caveat: `ByIndex*` results can transiently include an expired key until its
+cleanup runs (`GetMany`-backed record queries already drop it); `Stats` and
+`LiveBytes` count expired-but-unreaped entries. There is no remaining-TTL
+query — re-arm by rewriting with a fresh ttl.
+
 ### Options
 
 | Field            | Meaning                                                                                                                                                                                                                                                                                                                                                     |

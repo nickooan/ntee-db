@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // DefaultBlobThreshold is the value size at or above which a value is stored in
@@ -105,11 +106,31 @@ type DB struct {
 	hintBusy atomic.Bool    // single-flight: at most one async hint writer
 	hintWG   sync.WaitGroup // lets Close wait out an in-flight writer
 
+	// Lazy-TTL reaper. Reads that hit an expired pk entry report the key
+	// missing and enqueue it here; a single long-lived goroutine drains the
+	// queue in batches and issues durable deletes (tombstone + retraction).
+	// Drop-on-full is fine: a dropped request is re-enqueued by the next read
+	// hit and Compact/Reindex drop expired records regardless. Lock order:
+	// the reaper takes db.mu itself, so Close stops it BEFORE lockWrite (the
+	// hint writer's wait-under-mu pattern would deadlock here).
+	reapCh   chan reapReq
+	reapStop chan struct{}
+	reapOnce sync.Once
+	reapWG   sync.WaitGroup
+
 	// Secondary indexes (declared via Options.Indexes).
 	indexDefs   []IndexDef
 	secIndexes  map[string]*secIndex // name -> index
 	prospective map[string]bool      // indexes not yet back-filled over pre-existing records
 	dropped     map[string]ValueKind // soft-dropped indexes still lingering in records
+}
+
+// reapReq identifies one expired entry observed by a read: the key plus the
+// record offset seen at observation time, so the reaper never deletes a key
+// that was rewritten in the meantime (any rewrite gets a new offset).
+type reapReq struct {
+	key string
+	off int64
 }
 
 // Open opens (creating if necessary) the store in opts.Dir.
@@ -213,6 +234,13 @@ func Open(opts Options) (*DB, error) {
 	db.patcher = h.patcher
 	db.blobs = blobs
 	db.curGen = cur
+
+	// Start the lazy-TTL reaper last, so no goroutine leaks on a failed open.
+	db.reapCh = make(chan reapReq, 1024)
+	db.reapStop = make(chan struct{})
+	db.reapWG.Add(1)
+	go db.reapLoop()
+
 	opened = true
 	return db, nil
 }
@@ -230,7 +258,7 @@ func (db *DB) load() error {
 			// the btree's fast bulk path).
 			db.pk = newPkIndex()
 			for _, he := range entries {
-				db.pk.load(pkEntry{key: he.Key, off: he.Off, n: he.N, ix: he.IX})
+				db.pk.load(pkEntry{key: he.Key, off: he.Off, n: he.N, ix: he.IX, exp: he.Exp})
 				if len(he.IX) > 0 {
 					db.insertSec(he.Key, he.IX)
 				}
@@ -272,7 +300,7 @@ func (db *DB) replayTail(from int64) error {
 			db.retractSec(r.Key)
 			db.pk.remove(r.Key)
 		} else {
-			db.pk.upsert(pkEntry{key: r.Key, off: off, n: n})
+			db.pk.upsert(pkEntry{key: r.Key, off: off, n: n, exp: r.Exp})
 			db.refreshSec(r.Key, r.IX)
 		}
 		return nil
@@ -450,13 +478,22 @@ func (db *DB) lockWrite() {
 
 // Put stores value under key. Any secondary indexes with an Extract function
 // derive their value from the record automatically.
-func (db *DB) Put(key string, value []byte) error {
+//
+// An optional ttl (at most one, positive — else ErrInvalidTTL) gives the key
+// a time-to-live: once it elapses the key reads as missing and is lazily
+// deleted (see the TTL notes on pkGetLive). A Put WITHOUT a ttl clears any
+// existing TTL — the write replaces the record wholesale, Redis SET style.
+func (db *DB) Put(key string, value []byte, ttl ...time.Duration) error {
+	exp, err := resolveTTL(ttl)
+	if err != nil {
+		return err
+	}
 	db.lockWrite()
 	defer db.mu.Unlock()
 	if db.closed {
 		return ErrClosed
 	}
-	return db.write(key, value, nil)
+	return db.write(key, value, nil, exp)
 }
 
 // PutIndexed stores value under key with explicit secondary index values (e.g.
@@ -465,13 +502,21 @@ func (db *DB) Put(key string, value []byte) error {
 // a non-object record value is an error and nothing is written: only JSON
 // object values may carry index entries — immediate values (strings, numbers,
 // booleans, arrays, binary) are primary-key-only.
-func (db *DB) PutIndexed(key string, value []byte, idx IndexValues) error {
+//
+// The optional ttl behaves exactly as in Put. Note that secondary indexes are
+// TTL-unaware: an expired key can appear in ByIndex* results until its lazy
+// cleanup runs (record fetches drop it — GetMany reports it missing).
+func (db *DB) PutIndexed(key string, value []byte, idx IndexValues, ttl ...time.Duration) error {
+	exp, err := resolveTTL(ttl)
+	if err != nil {
+		return err
+	}
 	db.lockWrite()
 	defer db.mu.Unlock()
 	if db.closed {
 		return ErrClosed
 	}
-	return db.write(key, value, idx)
+	return db.write(key, value, idx, exp)
 }
 
 // Get returns the value stored under key. ok is false if the key is absent.
@@ -487,7 +532,7 @@ func (db *DB) Get(key string) (value []byte, ok bool, err error) {
 	if db.closed {
 		return nil, false, ErrClosed
 	}
-	e, ok := db.pk.get(key)
+	e, ok := db.pkGetLive(key)
 	if !ok {
 		return nil, false, nil
 	}
@@ -523,7 +568,7 @@ func (db *DB) GetMany(keys []string) (values [][]byte, found []bool, err error) 
 	values = make([][]byte, len(keys))
 	found = make([]bool, len(keys))
 	for i, key := range keys {
-		e, ok := db.pk.get(key)
+		e, ok := db.pkGetLive(key)
 		if !ok {
 			continue
 		}
@@ -594,14 +639,16 @@ func (db *DB) LiveBytes() int64 {
 	return n
 }
 
-// Has reports whether key is present without reading its value.
+// Has reports whether key is present without reading its value. Note the
+// asymmetry with ByIndexHas: secondary indexes are TTL-unaware, so an
+// expired key can still answer true there until its lazy cleanup runs.
 func (db *DB) Has(key string) bool {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 	if db.closed {
 		return false
 	}
-	_, ok := db.pk.get(key)
+	_, ok := db.pkGetLive(key)
 	return ok
 }
 
@@ -615,15 +662,110 @@ func (db *DB) Delete(key string) error {
 	if _, ok := db.pk.get(key); !ok {
 		return nil
 	}
+	if err := db.deleteLocked(key); err != nil {
+		return err
+	}
+	db.maybeWriteHint()
+	return nil
+}
+
+// deleteLocked appends a tombstone for key and removes it from the in-memory
+// indexes. Retraction must precede pk.remove: it reads ix off the pk entry.
+// Shared by Delete, MaxPerValue eviction, expired-counter cleanup, and the
+// TTL reaper.
+//
+// Locking: acquires nothing itself — db.mu (write) must already be held and
+// db.closed already checked by the caller.
+func (db *DB) deleteLocked(key string) error {
 	if _, _, err := db.main.append(record{Key: key, Deleted: true}); err != nil {
 		return err
 	}
-	// Retract first: the retraction reads ix off the primary entry.
 	db.retractSec(key)
 	db.pk.remove(key)
 	db.writes++
-	db.maybeWriteHint()
 	return nil
+}
+
+// pkGetLive is pk.get plus the lazy TTL check: an entry whose expiry has
+// passed reads as missing and is handed to the reaper for durable cleanup.
+// Safe under either db.mu mode (the enqueue never blocks).
+func (db *DB) pkGetLive(key string) (pkEntry, bool) {
+	e, ok := db.pk.get(key)
+	if !ok {
+		return pkEntry{}, false
+	}
+	if e.expiredAt(nowMillis()) {
+		db.reapAsync(e)
+		return pkEntry{}, false
+	}
+	return e, true
+}
+
+// reapAsync queues an expired entry for the reaper without ever blocking a
+// read: when the queue is full the request is simply dropped — the next hit
+// re-enqueues it, and Compact/Reindex drop expired records regardless.
+func (db *DB) reapAsync(e pkEntry) {
+	select {
+	case db.reapCh <- reapReq{key: e.key, off: e.off}:
+	default:
+	}
+}
+
+// reapLoop is the single lazy-TTL reaper goroutine: it drains queued expiry
+// observations in batches and deletes them under one lock acquisition (and,
+// in durable mode, one flush per batch rather than per key).
+func (db *DB) reapLoop() {
+	defer db.reapWG.Done()
+	for {
+		select {
+		case <-db.reapStop:
+			return
+		case r := <-db.reapCh:
+			batch := []reapReq{r}
+			// Drain whatever else is already queued, bounded per cycle.
+		drain:
+			for len(batch) < 64 {
+				select {
+				case more := <-db.reapCh:
+					batch = append(batch, more)
+				default:
+					break drain
+				}
+			}
+			db.reapBatch(batch)
+		}
+	}
+}
+
+// reapBatch durably deletes the still-expired entries of one drain cycle.
+func (db *DB) reapBatch(batch []reapReq) {
+	db.lockWrite()
+	defer db.mu.Unlock()
+	if db.closed {
+		return
+	}
+	now := nowMillis()
+	reaped := false
+	for _, r := range batch {
+		e, ok := db.pk.get(r.key)
+		if !ok || e.off != r.off {
+			continue // deleted or rewritten since the observation (anti-ABA)
+		}
+		if !e.expiredAt(now) {
+			continue // rewritten with a fresh TTL at the same offset epoch
+		}
+		if err := db.deleteLocked(r.key); err != nil {
+			return // I/O trouble: stop; remaining entries retry on next hit
+		}
+		reaped = true
+	}
+	if !reaped {
+		return
+	}
+	if db.opts.SyncEveryWrite {
+		_ = db.main.flush() // one flush per batch, not per tombstone
+	}
+	db.maybeWriteHint()
 }
 
 // PrefixScan returns, in sorted order, every key beginning with prefix. An empty
@@ -635,9 +777,14 @@ func (db *DB) PrefixScan(prefix string) ([]string, error) {
 		return nil, ErrClosed
 	}
 	es := db.pk.prefix(prefix)
-	keys := make([]string, len(es))
-	for i, e := range es {
-		keys[i] = e.key
+	now := nowMillis()
+	keys := make([]string, 0, len(es))
+	for _, e := range es {
+		if e.expiredAt(now) {
+			db.reapAsync(e)
+			continue
+		}
+		keys = append(keys, e.key)
 	}
 	return keys, nil
 }
@@ -666,6 +813,16 @@ func (db *DB) readRecord(e pkEntry) (record, error) {
 // Close flushes pending state and releases resources. The DB must not be used
 // afterward.
 func (db *DB) Close() error {
+	// Stop the TTL reaper BEFORE taking db.mu: unlike the hint writer, the
+	// reaper acquires db.mu itself, so waiting for it under the lock would
+	// deadlock. An in-flight batch completes (durably) before we proceed.
+	db.reapOnce.Do(func() {
+		if db.reapStop != nil {
+			close(db.reapStop)
+		}
+	})
+	db.reapWG.Wait()
+
 	// lockWrite waits out an in-flight compaction rebuild: Close must not
 	// tear down file handles the rebuild is still reading.
 	db.lockWrite()

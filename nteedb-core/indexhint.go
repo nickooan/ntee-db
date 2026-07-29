@@ -6,7 +6,11 @@ import (
 	"os"
 )
 
-const indexHintFormatVersion = 1
+// indexHintFormatVersion is checked with strict equality on load. v2 added
+// the per-key "e" expiry field; the bump makes an old binary reject a new
+// hint (falling back to a full log scan, which recovers expiries from the
+// records) instead of silently loading entries without their TTLs.
+const indexHintFormatVersion = 2
 
 // indexHintMeta is the first line of an index-hint file — the boot-time
 // snapshot of the in-memory indexes (main.jsonl.hint), a pure fast-boot
@@ -24,6 +28,7 @@ type indexHintLine struct {
 	Off int64          `json:"o"`
 	N   int32          `json:"n"`
 	IX  map[string]any `json:"ix,omitempty"`
+	Exp int64          `json:"e,omitempty"` // unix-ms expiry; 0 = no TTL
 }
 
 // writeIndexHint atomically writes the index entries (in sorted order) plus
@@ -49,7 +54,7 @@ func writeIndexHint(path string, pk *pkIndex, covers int64) (err error) {
 		return err
 	}
 	pk.scan(func(e pkEntry) bool { // ascending key order
-		err = encodeJSONLine(w, indexHintLine{Key: e.key, Off: e.off, N: e.n, IX: e.ix})
+		err = encodeJSONLine(w, indexHintLine{Key: e.key, Off: e.off, N: e.n, IX: e.ix, Exp: e.exp})
 		return err == nil
 	})
 	if err != nil {

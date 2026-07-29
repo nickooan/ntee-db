@@ -207,27 +207,27 @@ if (Buffer.isBuffer(v)) {
 
 ## API
 
-| Method                                                        | Returns                                    | Notes                                                                                      |
-| ------------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------ |
-| `NteeDB.open(dir, opts?)`                                     | `NteeDB`                                   | creates if missing                                                                         |
-| `NteeDB.destroy(dir)`                                         | `void`                                     | delete a store's files (no open handle)                                                    |
-| `put(key, value, ix?)`                                        | `void`                                     | `value`: object\|string\|Buffer (object → JSON); `ix`: `{name: string\|number}`            |
-| `putMany(items)`                                              | `Promise<number>`                          | one batch off the event loop; in-order; all-or-nothing validation                          |
-| `incr(key, delta?)` / `decr(key, delta?)`                     | `Promise<number>`                          | atomic int64 counter; delta defaults to 1; resolves to the new value; **async**            |
-| `topup(key, amount, max)`                                     | `Promise<number>`                          | fill toward `max`; resolves to the overflow that didn't fit (0 = fully applied); **async** |
-| `take(key, amount, left)`                                     | `Promise<boolean>`                         | subtract only if the result stays ≥ `left`; true iff applied; **async**                    |
-| `get(key)`                                                    | `Promise<value \| null>`                   | the stored JSON parsed (a Buffer for binary/non-JSON); **async** (off the loop)            |
-| `getMany(keys)`                                               | `Promise<(value\|null)[]>`                 | batched get, one crossing, aligned to `keys`; **async** (off the event loop)               |
-| `has(key)`                                                    | `Promise<boolean>`                         | **async** (off the loop)                                                                   |
-| `delete(key)`                                                 | `void`                                     |                                                                                            |
-| `stats()`                                                     | `Promise<{records, mainBytes, blobBytes}>` | cheap in-memory counters (sizes include dead space until `compact()`); **async**           |
-| `prefixScan(prefix)`                                          | `Promise<string[]>`                        | sorted keys; **async** — concurrent scans run in parallel (off the loop)                   |
-| `secIndex / secIndexPrefix / secIndexRange`                   | `Promise<string[]>`                        | primary keys; **async** (off the loop)                                                     |
-| `secIndexHas(name, val)`                                      | `Promise<boolean>`                         | any record has `val` in the index (no keys materialized); **async**                        |
-| `secIndexRecords / secIndexPrefixRecords / prefixScanRecords` | `Promise<{key, value}[]>`                  | keys + parsed content; **async** (record fetch off the event loop)                         |
-| `secIndexDropped / secIndexProspective`                       | `Promise<string[]>`                        | schema state; **async**                                                                    |
-| `compact()` / `reindex()`                                     | `Promise<void>`                            | run off the event loop                                                                     |
-| `close()` / `drop()`                                          | `void`                                     |                                                                                            |
+| Method                                                        | Returns                                    | Notes                                                                                                                                    |
+| ------------------------------------------------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `NteeDB.open(dir, opts?)`                                     | `NteeDB`                                   | creates if missing                                                                                                                       |
+| `NteeDB.destroy(dir)`                                         | `void`                                     | delete a store's files (no open handle)                                                                                                  |
+| `put(key, value, ix?, ttlMs?)`                                | `void`                                     | `value`: object\|string\|Buffer (object → JSON); `ix`: `{name: string\|number}`; optional TTL (a put without one clears an existing TTL) |
+| `putMany(items)`                                              | `Promise<number>`                          | one batch off the event loop; in-order; all-or-nothing validation                                                                        |
+| `incr(key, delta?, ttlMs?)` / `decr(key, delta?, ttlMs?)`     | `Promise<number>`                          | atomic int64 counter; delta defaults to 1; ttl applies on create only — `incr(w, 1, 60000)` is a fixed-window rate limiter; **async**    |
+| `topup(key, amount, max, ttlMs?)`                             | `Promise<number>`                          | fill toward `max`; resolves to the overflow that didn't fit (0 = fully applied); **async**                                               |
+| `take(key, amount, left, ttlMs?)`                             | `Promise<boolean>`                         | subtract only if the result stays ≥ `left`; true iff applied; **async**                                                                  |
+| `get(key)`                                                    | `Promise<value \| null>`                   | the stored JSON parsed (a Buffer for binary/non-JSON); **async** (off the loop)                                                          |
+| `getMany(keys)`                                               | `Promise<(value\|null)[]>`                 | batched get, one crossing, aligned to `keys`; **async** (off the event loop)                                                             |
+| `has(key)`                                                    | `Promise<boolean>`                         | **async** (off the loop)                                                                                                                 |
+| `delete(key)`                                                 | `void`                                     |                                                                                                                                          |
+| `stats()`                                                     | `Promise<{records, mainBytes, blobBytes}>` | cheap in-memory counters (sizes include dead space until `compact()`); **async**                                                         |
+| `prefixScan(prefix)`                                          | `Promise<string[]>`                        | sorted keys; **async** — concurrent scans run in parallel (off the loop)                                                                 |
+| `secIndex / secIndexPrefix / secIndexRange`                   | `Promise<string[]>`                        | primary keys; **async** (off the loop)                                                                                                   |
+| `secIndexHas(name, val)`                                      | `Promise<boolean>`                         | any record has `val` in the index (no keys materialized); **async**                                                                      |
+| `secIndexRecords / secIndexPrefixRecords / prefixScanRecords` | `Promise<{key, value}[]>`                  | keys + parsed content; **async** (record fetch off the event loop)                                                                       |
+| `secIndexDropped / secIndexProspective`                       | `Promise<string[]>`                        | schema state; **async**                                                                                                                  |
+| `compact()` / `reindex()`                                     | `Promise<void>`                            | run off the event loop                                                                                                                   |
+| `close()` / `drop()`                                          | `void`                                     |                                                                                                                                          |
 
 ## Notes / limitations
 
@@ -249,6 +249,23 @@ if (Buffer.isBuffer(v)) {
   amount must be non-negative. These require a native library built from a
   version that exports them — rebuild via `capi/build.sh` if loading a
   locally built library.
+- **TTL (lazy per-key expiry)**: every write takes an optional `ttlMs`;
+  without it a key is immortal. Once the TTL passes the key reads as
+  missing (`get` → null, `has` → false) and is deleted lazily in the
+  background; `compact()`/`reindex()` drop leftovers. The rules:
+  - `put` replaces the record wholesale, so its TTL state wins — `ttlMs`
+    arms/replaces the expiry, omitting it **clears** an existing one.
+  - Counter ops (`incr`/`decr`/`topup`/`take`) **never touch a live
+    counter's TTL in either direction**: omitting `ttlMs` does NOT clear it
+    (unlike `put`), and passing it on a live counter is ignored
+    (create-only — a window's deadline never slides under traffic).
+  - An **expired** counter is recreated fresh by the next op, and then the
+    `ttlMs` arg decides: with it the new window is armed; without it the
+    recreated counter is **immortal**. For expiring windows/buckets, pass
+    `ttlMs` on every call — `incr("rl:u1", 1, 60000)` is a complete
+    fixed-window rate limiter (no-op on live keys, re-arms lapsed ones).
+  - Secondary indexes are TTL-unaware: an expired key can linger in
+    `secIndex*` key results until cleanup; record fetches already drop it.
 - **Only JSON-object values can be indexed**: immediate values — strings,
   numbers, booleans, arrays, binary — are plain key:value pairs addressed by
   primary key alone. Supplying `ix` with one throws, and `jsonPath` extraction
