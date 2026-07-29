@@ -38,7 +38,7 @@ func TestHintStaleThenTailReplay(t *testing.T) {
 	// the hint, to simulate writes after the last checkpoint.
 	db := mustOpen(t, dir)
 	db.Put("a", []byte("1"))
-	if err := db.writeHintLocked(); err != nil { // checkpoint at {a}
+	if err := db.writeHint(); err != nil { // checkpoint at {a}
 		t.Fatal(err)
 	}
 	db.Put("b", []byte("2"))

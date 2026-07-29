@@ -94,11 +94,15 @@ func (db *DB) Incr(key string, delta int64) (int64, error) {
 	if db.closed {
 		return 0, ErrClosed
 	}
-	return db.incrLocked(key, delta)
+	return db.incr(key, delta)
 }
 
-func (db *DB) incrLocked(key string, delta int64) (int64, error) {
-	next, _, err := db.counterUpdateLocked(key, func(cur int64) (int64, bool, error) {
+// incr is Incr's overflow-checked increment step over counterUpdate.
+//
+// Locking: acquires nothing itself — db.mu must already be held by the
+// caller (Incr takes it via lockWrite).
+func (db *DB) incr(key string, delta int64) (int64, error) {
+	next, _, err := db.counterUpdate(key, func(cur int64) (int64, bool, error) {
 		if (delta > 0 && cur > math.MaxInt64-delta) || (delta < 0 && cur < math.MinInt64-delta) {
 			return 0, false, ErrCounterOverflow
 		}
@@ -128,7 +132,7 @@ func (db *DB) Topup(key string, amount, max int64) (int64, error) {
 		return -1, ErrClosed
 	}
 	var overflow int64
-	_, _, err := db.counterUpdateLocked(key, func(cur int64) (int64, bool, error) {
+	_, _, err := db.counterUpdate(key, func(cur int64) (int64, bool, error) {
 		var applied int64
 		switch {
 		case cur >= max:
@@ -168,7 +172,7 @@ func (db *DB) Take(key string, amount, left int64) (bool, error) {
 	if db.closed {
 		return false, ErrClosed
 	}
-	_, applied, err := db.counterUpdateLocked(key, func(cur int64) (int64, bool, error) {
+	_, applied, err := db.counterUpdate(key, func(cur int64) (int64, bool, error) {
 		if cur < math.MinInt64+amount { // cur-amount underflows: certainly < left
 			return 0, false, nil
 		}
@@ -181,12 +185,17 @@ func (db *DB) Take(key string, amount, left int64) (bool, error) {
 	return applied, err
 }
 
-// counterUpdateLocked reads the counter at key (missing or deleted reads as
+// counterUpdate reads the counter at key (missing or deleted reads as
 // 0), asks step for the next value, and — when step applies — writes it
 // through the same in-place-patch / append machinery Incr uses. When step
 // declines (apply false), nothing is written: no append, no pk entry for a
-// missing key, no write/hint bookkeeping. Callers must hold db.mu.
-func (db *DB) counterUpdateLocked(key string, step func(cur int64) (next int64, apply bool, err error)) (int64, bool, error) {
+// missing key, no write/hint bookkeeping.
+//
+// Locking: acquires nothing itself — db.mu must already be held by the
+// caller (Incr/Topup/Take take it via lockWrite before calling in; the step
+// closure therefore also runs under the write lock, which is what makes the
+// read-check-write atomic).
+func (db *DB) counterUpdate(key string, step func(cur int64) (next int64, apply bool, err error)) (int64, bool, error) {
 	e, ok := db.pk.get(key)
 	if !ok {
 		// Missing (or previously deleted — tombstones drop the pk entry):
@@ -195,7 +204,7 @@ func (db *DB) counterUpdateLocked(key string, step func(cur int64) (next int64, 
 		if err != nil || !apply {
 			return next, false, err
 		}
-		return next, true, db.incrAppendLocked(key, next)
+		return next, true, db.incrAppend(key, next)
 	}
 
 	rec, err := db.readRecord(e)
@@ -241,19 +250,21 @@ func (db *DB) counterUpdateLocked(key string, step func(cur int64) (next int64, 
 		// Any mismatch (marshal drift, length, pattern): fall through to the
 		// always-correct append path.
 	}
-	return next, true, db.incrAppendLocked(key, next)
+	return next, true, db.incrAppend(key, next)
 }
 
-// incrAppendLocked appends the counter's new value as a fresh record. Counters
+// incrAppend appends the counter's new value as a fresh record. Counters
 // are pure key:value pairs — no secondary index derivation, no eviction
 // bookkeeping — so this is a bare append with the counter flag set (nil ix
 // also retracts any stale index entries if a legacy record carried them).
-// Callers must hold db.mu.
-func (db *DB) incrAppendLocked(key string, v int64) error {
-	if err := db.appendRecordLocked(key, formatCounter(v), nil, db.opts.SyncEveryWrite, true); err != nil {
+//
+// Locking: acquires nothing itself — db.mu must already be held by the
+// caller (reached only from counterUpdate, under the write lock).
+func (db *DB) incrAppend(key string, v int64) error {
+	if err := db.appendRecord(key, formatCounter(v), nil, db.opts.SyncEveryWrite, true); err != nil {
 		return err
 	}
 	db.writes++
-	db.maybeWriteHintLocked()
+	db.maybeWriteHint()
 	return nil
 }

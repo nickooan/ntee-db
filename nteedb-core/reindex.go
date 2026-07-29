@@ -17,7 +17,7 @@ func (db *DB) Reindex() error {
 	}
 	db.lockWrite()
 	defer db.mu.Unlock()
-	return db.markReindexedLocked()
+	return db.markReindexed()
 }
 
 // reindexTransform recomputes a record's ix: it keeps the declared values
@@ -57,10 +57,13 @@ func (db *DB) reindexTransform(rec record) (record, error) {
 	return rec, nil
 }
 
-// markReindexedLocked updates meta and prospective state after a Reindex:
+// markReindexed updates meta and prospective state after a Reindex:
 // Extract-based indexes are now complete; explicit-value indexes keep their
-// prior prospective status (Reindex cannot back-fill them). Callers hold db.mu.
-func (db *DB) markReindexedLocked() error {
+// prior prospective status (Reindex cannot back-fill them).
+//
+// Locking: acquires nothing itself — db.mu must already be held by the
+// caller (Reindex takes it via lockWrite).
+func (db *DB) markReindexed() error {
 	hasExtract := make(map[string]bool, len(db.indexDefs))
 	for _, def := range db.indexDefs {
 		if def.Extract != nil {

@@ -40,7 +40,7 @@ func (db *DB) PutBatch(items []PutItem) error {
 		if err != nil {
 			return fmt.Errorf("nteedb: batch item %d (%q): %w", i, it.Key, err)
 		}
-		if err := db.checkSelfEvictionLocked(it.Key, ix); err != nil {
+		if err := db.checkSelfEviction(it.Key, ix); err != nil {
 			return fmt.Errorf("nteedb: batch item %d: %w", i, err)
 		}
 		ixs[i] = ix
@@ -48,7 +48,7 @@ func (db *DB) PutBatch(items []PutItem) error {
 
 	// Pass 2 — append in order, without per-write fsyncs.
 	for i, it := range items {
-		if err := db.appendRecordLocked(it.Key, it.Value, ixs[i], false, false); err != nil {
+		if err := db.appendRecord(it.Key, it.Value, ixs[i], false, false); err != nil {
 			return fmt.Errorf("nteedb: batch item %d (%q): %w", i, it.Key, err)
 		}
 	}
@@ -64,7 +64,7 @@ func (db *DB) PutBatch(items []PutItem) error {
 				continue
 			}
 			seen[key] = struct{}{}
-			if err := db.enforceMaxPerValueLocked(map[string]any{name: val}); err != nil {
+			if err := db.enforceMaxPerValue(map[string]any{name: val}); err != nil {
 				return err
 			}
 		}
@@ -84,6 +84,6 @@ func (db *DB) PutBatch(items []PutItem) error {
 	}
 
 	db.writes += len(items)
-	db.maybeWriteHintLocked()
+	db.maybeWriteHint()
 	return nil
 }
