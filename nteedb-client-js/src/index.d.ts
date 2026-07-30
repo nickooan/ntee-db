@@ -54,8 +54,15 @@ export interface HelloInfo {
 export interface Stats {
   records: number
   mainBytes: number
+  /** Live record-line bytes — what a compact would shrink the main log to. */
   liveBytes: number
   blobBytes: number
+  /** Blob bytes referenced by live records. */
+  blobLiveBytes: number
+  /** blobBytes - blobLiveBytes: what a relieve would reclaim. */
+  blobOrphanedBytes: number
+  /** Blob generation files present; >1 means a crashed relieve left a stray file. */
+  blobGenerations: number
   connections: number
   totalConns: number
   commands: number

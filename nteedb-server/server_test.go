@@ -390,6 +390,12 @@ func TestRelieveCommand(t *testing.T) {
 	if after["blobCompacts"].(float64) != 1 {
 		t.Errorf("blobCompacts should be 1, got %v", after["blobCompacts"])
 	}
+	if after["blobOrphanedBytes"].(float64) != 0 {
+		t.Errorf("blobOrphanedBytes should be 0 after relieve, got %v", after["blobOrphanedBytes"])
+	}
+	if after["blobGenerations"].(float64) != 1 {
+		t.Errorf("blobGenerations should be 1 after relieve, got %v", after["blobGenerations"])
+	}
 	m := tc.cmd("get k:05")
 	if m["found"] != true {
 		t.Fatalf("data lost after relieve: %v", m)

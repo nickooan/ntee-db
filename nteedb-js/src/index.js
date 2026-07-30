@@ -366,6 +366,40 @@ export class NteeDB {
     return callAsync(fns.reindex, this.#h)
   }
 
+  /**
+   * Unconditional blob rewrite: every live blob is copied into a fresh
+   * generation file, orphaned blobs are dropped, and the main log is compacted
+   * in the same pass. Cost is O(live bytes) INCLUDING blob contents — decide
+   * when to run it from blobUsage() numbers (e.g. orphanedBytes ratio). Async.
+   */
+  relieve() {
+    this.#assertOpen()
+    return callAsync(fns.relieve, this.#h)
+  }
+
+  /**
+   * Blob-file occupancy: { totalBytes, liveBytes, orphanedBytes, generations }
+   * — the input for deciding when to relieve(). O(records) small reads: fine
+   * for a periodic policy check, too expensive per request (stats() stays the
+   * cheap one). Async.
+   */
+  blobUsage() {
+    this.#assertOpen()
+    return callAsync(fns.blobUsage, this.#h)
+  }
+
+  /**
+   * Full store details — what a server operator sees: { records, mainBytes,
+   * liveBytes, blobBytes, blobLiveBytes, blobOrphanedBytes, blobGenerations }.
+   * mainBytes - liveBytes is the dead space compact() would reclaim;
+   * blobOrphanedBytes is what relieve() would reclaim. Same O(records) cost as
+   * blobUsage() — periodic use, not per-request. Async.
+   */
+  details() {
+    this.#assertOpen()
+    return callAsync(fns.details, this.#h)
+  }
+
   /** Flush and close. */
   close() {
     if (this.#closed) return

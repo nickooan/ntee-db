@@ -515,6 +515,50 @@ func nteedb_reindex(h C.uint) *C.char {
 	return reply(nil, db.Reindex())
 }
 
+//export nteedb_relieve
+func nteedb_relieve(h C.uint) *C.char {
+	db := regGet(uint32(h))
+	if db == nil {
+		return reply(nil, errInvalidHandle)
+	}
+	return reply(nil, db.BlobsRelieve())
+}
+
+//export nteedb_blob_usage
+func nteedb_blob_usage(h C.uint) *C.char {
+	db := regGet(uint32(h))
+	if db == nil {
+		return reply(nil, errInvalidHandle)
+	}
+	u, err := db.BlobUsage()
+	if err != nil {
+		return reply(nil, err)
+	}
+	return reply(u, nil)
+}
+
+//export nteedb_details
+func nteedb_details(h C.uint) *C.char {
+	db := regGet(uint32(h))
+	if db == nil {
+		return reply(nil, errInvalidHandle)
+	}
+	st := db.Stats()
+	u, err := db.BlobUsage()
+	if err != nil {
+		return reply(nil, err)
+	}
+	return reply(map[string]any{
+		"records":           st.Records,
+		"mainBytes":         st.MainBytes,
+		"liveBytes":         db.LiveBytes(),
+		"blobBytes":         st.BlobBytes,
+		"blobLiveBytes":     u.LiveBytes,
+		"blobOrphanedBytes": u.OrphanedBytes,
+		"blobGenerations":   u.Generations,
+	}, nil)
+}
+
 //export nteedb_dropped_indexes
 func nteedb_dropped_indexes(h C.uint) *C.char {
 	db := regGet(uint32(h))

@@ -377,19 +377,28 @@ func (s *Server) dispatch(rw respWriter, r *bufio.Reader, line []byte, st *connS
 	// ---- introspection ----
 	case "stats":
 		st := s.db.Stats()
+		// BlobUsage costs O(records) small preads — cheap enough for a
+		// monitoring command, same budget as the LiveBytes walk below.
+		u, err := s.db.BlobUsage()
+		if err != nil {
+			return false, rw.fail("%v", err)
+		}
 		s.mu.Lock()
 		open := len(s.conns)
 		s.mu.Unlock()
 		return false, rw.ok(map[string]any{
-			"records":      st.Records,
-			"mainBytes":    st.MainBytes,
-			"liveBytes":    s.db.LiveBytes(),
-			"blobBytes":    st.BlobBytes,
-			"connections":  open,
-			"totalConns":   s.totalConns.Load(),
-			"commands":     s.commands.Load(),
-			"autoCompacts": s.autoCompacts.Load(),
-			"blobCompacts": s.blobCompacts.Load(),
+			"records":           st.Records,
+			"mainBytes":         st.MainBytes,
+			"liveBytes":         s.db.LiveBytes(),
+			"blobBytes":         st.BlobBytes,
+			"blobLiveBytes":     u.LiveBytes,
+			"blobOrphanedBytes": u.OrphanedBytes,
+			"blobGenerations":   u.Generations,
+			"connections":       open,
+			"totalConns":        s.totalConns.Load(),
+			"commands":          s.commands.Load(),
+			"autoCompacts":      s.autoCompacts.Load(),
+			"blobCompacts":      s.blobCompacts.Load(),
 		})
 
 	case "dropped":

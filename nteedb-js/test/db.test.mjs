@@ -464,6 +464,37 @@ test("async compact and reindex", async () => {
   )
 })
 
+test("blobUsage, details, and relieve reclaim orphaned blobs", async () => {
+  await withDB({ blobThreshold: 32 }, async (db) => {
+    const keep = Buffer.alloc(100, 0xaa)
+    db.put("keep", keep) // blob path
+    db.put("gone", Buffer.alloc(200, 0xbb)) // blob path
+    db.delete("gone") // orphans its blob until relieve()
+
+    const u = await db.blobUsage()
+    assert.equal(u.totalBytes, 300)
+    assert.equal(u.liveBytes, 100)
+    assert.equal(u.orphanedBytes, 200)
+    assert.equal(u.generations, 1)
+
+    const d = await db.details()
+    assert.equal(d.records, 1)
+    assert.equal(d.blobBytes, 300)
+    assert.equal(d.blobLiveBytes, 100)
+    assert.equal(d.blobOrphanedBytes, 200)
+    assert.equal(d.blobGenerations, 1)
+    assert.ok(d.liveBytes > 0)
+    assert.ok(d.liveBytes < d.mainBytes) // dead put line + tombstone
+
+    await db.relieve()
+    const u2 = await db.blobUsage()
+    assert.equal(u2.totalBytes, 100)
+    assert.equal(u2.orphanedBytes, 0)
+    assert.equal(u2.generations, 1)
+    assert.ok((await db.get("keep")).equals(keep))
+  })
+})
+
 test("error surfaces as thrown Error", async () => {
   await withDB(
     { indexes: [{ name: "status", kind: "number" }] },
