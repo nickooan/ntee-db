@@ -1,0 +1,153 @@
+# Publish the npm packages when a release tag is cut:
+#
+#   git tag v0.3.0 && git push origin v0.3.0
+#
+# For each package, the package.json version at the tagged commit is compared
+# against the version at the previous release tag; only changed packages are
+# published. For ntee-db the native c-shared libraries are rebuilt from the
+# tagged source on real runners (macOS host build + dockerized Linux builds,
+# mirroring capi/build.sh) and shipped in place of the committed prebuilds.
+# The Go server release on the same tag is handled by release.yml.
+name: npm-publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # npm provenance attestation
+
+jobs:
+  # Decide which packages changed since the previous release tag.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      db: ${{ steps.diff.outputs.db }}
+      db_version: ${{ steps.diff.outputs.db_version }}
+      client: ${{ steps.diff.outputs.client }}
+      client_version: ${{ steps.diff.outputs.client_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags: needed to find the previous release tag
+      - id: diff
+        run: |
+          prev_tag="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+          echo "previous tag: ${prev_tag:-none}"
+
+          compare() { # <output-key> <package-dir>
+            local key="$1" dir="$2" version prev_version prev_json
+            version="$(node -p "require('./$dir/package.json').version")"
+            if [ -n "$prev_tag" ] && prev_json="$(git show "$prev_tag:$dir/package.json" 2>/dev/null)"; then
+              prev_version="$(node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version' <<<"$prev_json")"
+            else
+              prev_version="(none)"
+            fi
+            echo "$dir: $prev_version -> $version"
+            if [ "$version" != "$prev_version" ]; then
+              echo "$key=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$key=false" >> "$GITHUB_OUTPUT"
+            fi
+            echo "${key}_version=$version" >> "$GITHUB_OUTPUT"
+          }
+
+          compare db nteedb-js
+          compare client nteedb-client-js
+
+  # Build the ntee-db native libraries from the tagged source, one runner per
+  # target — exactly what capi/build.sh does locally.
+  build-native:
+    needs: check
+    if: needs.check.outputs.db == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: macos
+            runner: macos-15 # Apple Silicon: host build, no Docker
+            platdir: darwin-arm64
+          - target: linux-amd64
+            runner: ubuntu-latest # Docker preinstalled
+            platdir: linux-amd64
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm # native ARM: Docker build without QEMU
+            platdir: linux-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: bash nteedb-js/capi/build.sh ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prebuilds-${{ matrix.platdir }}
+          path: nteedb-js/prebuilds/${{ matrix.platdir }}/
+          if-no-files-found: error
+
+  publish-ntee-db:
+    needs: [check, build-native]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: nteedb-js
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: nteedb-js/package-lock.json
+      # Replace the committed prebuilds with the freshly built ones.
+      - uses: actions/download-artifact@v4
+        with:
+          name: prebuilds-darwin-arm64
+          path: nteedb-js/prebuilds/darwin-arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: prebuilds-linux-amd64
+          path: nteedb-js/prebuilds/linux-amd64
+      - uses: actions/download-artifact@v4
+        with:
+          name: prebuilds-linux-arm64
+          path: nteedb-js/prebuilds/linux-arm64
+      - run: npm ci
+      - name: Test (against the freshly built linux-amd64 library)
+        run: |
+          npm run format:check
+          npm test
+      - name: Publish ntee-db@${{ needs.check.outputs.db_version }}
+        run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-ntee-db-client:
+    needs: check
+    if: needs.check.outputs.client == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: nteedb-client-js
+    steps:
+      - uses: actions/checkout@v4 # full repo: tests build ./nteedb-server
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: nteedb-client-js/package-lock.json
+      - uses: actions/setup-go@v5 # tests build and spawn the real server
+        with:
+          go-version-file: go.mod
+      - run: npm ci
+      - name: Test
+        run: |
+          npm run format:check
+          npm test
+      - name: Publish ntee-db-client@${{ needs.check.outputs.client_version }}
+        run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
