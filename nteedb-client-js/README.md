@@ -129,34 +129,34 @@ Stored values are bytes; the server encodes them in responses by content:
 Every method maps 1:1 to a server command. Method names mirror the embedded
 [`ntee-db`](../nteedb-js/README.md) binding where the operation matches.
 
-| Method                                                 | Command                 | Resolves to                                                            |
-| ------------------------------------------------------ | ----------------------- | ---------------------------------------------------------------------- |
-| `NteeClient.connect(opts)`                             | `auth` + `hello`        | connected client (`.info` set)                                         |
-| `hello()`                                              | `hello`                 | `{server, version, auth, indexes?}`                                    |
-| `auth(pw \| {user, password})`                         | `auth`                  | `true` (refreshes `.info`)                                             |
-| `ping()`                                               | `ping`                  | `"pong"`                                                               |
-| `quit()` / `close()`                                   | `quit`                  | graceful disconnect, idempotent                                        |
-| `get(key)`                                             | `get`                   | value or `null`                                                        |
-| `getMany(keys)`                                        | `getm`                  | values aligned to `keys` (`null` for misses)                           |
-| `has(key)`                                             | `has`                   | `boolean`                                                              |
-| `prefixScan(prefix?)`                                  | `scan`                  | sorted keys                                                            |
-| `secIndex(name, val, limit?)`                          | `ix`                    | keys (`0` all asc, `N` first N, `-N` last N desc)                      |
-| `secIndexHas(name, val)`                               | `ixh`                   | `boolean`                                                              |
-| `secIndexPrefix(name, prefix, limit?)`                 | `ixp`                   | keys (limit applies per distinct value)                                |
-| `secIndexRange(name, lo, hi)`                          | `ixr`                   | keys (inclusive bounds)                                                |
-| `secIndexRecords(name, val, limit?)`                   | `ixrec`                 | `[{key, value}]` decoded                                               |
-| `put(key, value)`                                      | `put` (length-prefixed) | `true`                                                                 |
-| `put(key, value, ix)`                                  | `putx`                  | `true` (value must be a JSON object)                                   |
-| `put(key, value, ix?, ttlMs)`                          | `putex` / `putx` + ttl  | `true` — write with a time-to-live                                     |
-| `delete(key)`                                          | `del`                   | `true` (even if absent)                                                |
-| `incr(key, delta?, ttlMs?)` / `decr(...)`              | `incr`/`decr`           | new counter value (ttl applies on create only)                         |
-| `topup(key, amount, max, ttlMs?)`                      | `topup`                 | overflow that didn't fit (`0` = fully applied)                         |
-| `take(key, amount, left, ttlMs?)`                      | `take`                  | `true` iff applied                                                     |
-| `removeByPkLess(cutoff)` / `removeByPkGreater(cutoff)` | `rml`/`rmg`             | deleted count                                                          |
-| `stats()`                                              | `stats`                 | `{records, mainBytes, liveBytes, blobBytes, connections, …}`           |
-| `secIndexDropped()` / `secIndexProspective()`          | `dropped`/`prospective` | index names                                                            |
-| `compact()` / `reindex()` / `relieve()`                | same                    | `true` (admin role; may take seconds)                                  |
-| `command(line)`                                        | _(any)_                 | raw envelope `{ok, found?, result?, err?}`, never throws on `ok:false` |
+| Method                                                 | Command                 | Resolves to                                                                                                     |
+| ------------------------------------------------------ | ----------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `NteeClient.connect(opts)`                             | `auth` + `hello`        | connected client (`.info` set)                                                                                  |
+| `hello()`                                              | `hello`                 | `{server, version, auth, indexes?}`                                                                             |
+| `auth(pw \| {user, password})`                         | `auth`                  | `true` (refreshes `.info`)                                                                                      |
+| `ping()`                                               | `ping`                  | `"pong"`                                                                                                        |
+| `quit()` / `close()`                                   | `quit`                  | graceful disconnect, idempotent                                                                                 |
+| `get(key)`                                             | `get`                   | value or `null`                                                                                                 |
+| `getMany(keys)`                                        | `getm`                  | values aligned to `keys` (`null` for misses)                                                                    |
+| `has(key)`                                             | `has`                   | `boolean`                                                                                                       |
+| `prefixScan(prefix?)`                                  | `scan`                  | sorted keys                                                                                                     |
+| `secIndex(name, val, limit?)`                          | `ix`                    | keys (`0` all asc, `N` first N, `-N` last N desc)                                                               |
+| `secIndexHas(name, val)`                               | `ixh`                   | `boolean`                                                                                                       |
+| `secIndexPrefix(name, prefix, limit?)`                 | `ixp`                   | keys (limit applies per distinct value)                                                                         |
+| `secIndexRange(name, lo, hi)`                          | `ixr`                   | keys (inclusive bounds)                                                                                         |
+| `secIndexRecords(name, val, limit?)`                   | `ixrec`                 | `[{key, value}]` decoded                                                                                        |
+| `put(key, value)`                                      | `put` (length-prefixed) | `true`                                                                                                          |
+| `put(key, value, ix)`                                  | `putx`                  | `true` (value must be a JSON object)                                                                            |
+| `put(key, value, ix?, ttlMs)`                          | `putex` / `putx` + ttl  | `true` — write with a time-to-live                                                                              |
+| `delete(key)`                                          | `del`                   | `true` (even if absent)                                                                                         |
+| `incr(key, delta?, ttlMs?)` / `decr(...)`              | `incr`/`decr`           | new counter value (ttl applies on create only)                                                                  |
+| `topup(key, amount, max, ttlMs?)`                      | `topup`                 | overflow that didn't fit (`0` = fully applied)                                                                  |
+| `take(key, amount, left, ttlMs?)`                      | `take`                  | `true` iff applied                                                                                              |
+| `removeByPkLess(cutoff)` / `removeByPkGreater(cutoff)` | `rml`/`rmg`             | deleted count                                                                                                   |
+| `stats()`                                              | `stats`                 | `{records, mainBytes, liveBytes, blobBytes, blobLiveBytes, blobOrphanedBytes, blobGenerations, connections, …}` |
+| `secIndexDropped()` / `secIndexProspective()`          | `dropped`/`prospective` | index names                                                                                                     |
+| `compact()` / `reindex()` / `relieve()`                | same                    | `true` (admin role; may take seconds)                                                                           |
+| `command(line)`                                        | _(any)_                 | raw envelope `{ok, found?, result?, err?}`, never throws on `ok:false`                                          |
 
 ## Errors
 

@@ -65,6 +65,36 @@ export interface StoreStats {
   blobBytes: number
 }
 
+/** Blob-file occupancy — the input for deciding when to relieve(). */
+export interface BlobUsage {
+  /** Size of all blob generation files. */
+  totalBytes: number
+  /** Bytes referenced by live records. */
+  liveBytes: number
+  /** totalBytes - liveBytes: what relieve() would reclaim. */
+  orphanedBytes: number
+  /** Blob generation files present; >1 means a crashed relieve left a stray file. */
+  generations: number
+}
+
+/** Full store details (details()) — the numbers a server operator sees. */
+export interface StoreDetails {
+  /** Live records (primary keys). */
+  records: number
+  /** main.jsonl bytes, dead records included. */
+  mainBytes: number
+  /** Live record-line bytes — what compact() would shrink the main log to. */
+  liveBytes: number
+  /** Size of all blob generation files. */
+  blobBytes: number
+  /** Blob bytes referenced by live records. */
+  blobLiveBytes: number
+  /** blobBytes - blobLiveBytes: what relieve() would reclaim. */
+  blobOrphanedBytes: number
+  /** Blob generation files present; >1 means a crashed relieve left a stray file. */
+  blobGenerations: number
+}
+
 export declare class NteeDB {
   private constructor(handle: number)
 
@@ -227,6 +257,22 @@ export declare class NteeDB {
   compact(): Promise<void>
   /** Back-fill Extract-based indexes over history + purge dropped (off the event loop). */
   reindex(): Promise<void>
+  /**
+   * Unconditional blob rewrite + main-log compaction: drops orphaned blobs,
+   * consolidates generations. O(live bytes) including blob contents — decide
+   * when to run it from blobUsage(). Runs off the event loop.
+   */
+  relieve(): Promise<void>
+  /**
+   * Blob-file occupancy. O(records) small reads: fine periodically, too
+   * expensive per request (stats() is the cheap one). Async.
+   */
+  blobUsage(): Promise<BlobUsage>
+  /**
+   * Full store details: stats() plus liveBytes and the blob breakdown. Same
+   * O(records) cost as blobUsage() — periodic use, not per-request. Async.
+   */
+  details(): Promise<StoreDetails>
 
   /** Flush and close. */
   close(): void

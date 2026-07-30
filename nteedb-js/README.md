@@ -169,6 +169,9 @@ const [a, b] = await Promise.all([db.prefixScan("a:"), db.prefixScan("b:")])
 // maintenance (off the event loop)
 await db.compact() // reclaim dead records
 await db.reindex() // back-fill jsonPath indexes over history; purge dropped
+await db.blobUsage() // { totalBytes, liveBytes, orphanedBytes, generations }
+await db.relieve() // rewrite blobs: drop orphaned ones + compact the main log
+await db.details() // stats() + liveBytes + the blob breakdown
 
 db.close() // or db.drop() to delete the store
 ```
@@ -227,6 +230,9 @@ if (Buffer.isBuffer(v)) {
 | `secIndexRecords / secIndexPrefixRecords / prefixScanRecords` | `Promise<{key, value}[]>`                  | keys + parsed content; **async** (record fetch off the event loop)                                                                       |
 | `secIndexDropped / secIndexProspective`                       | `Promise<string[]>`                        | schema state; **async**                                                                                                                  |
 | `compact()` / `reindex()`                                     | `Promise<void>`                            | run off the event loop                                                                                                                   |
+| `relieve()`                                                   | `Promise<void>`                            | blob rewrite + compaction: reclaims orphaned blob space; O(live bytes incl. blobs); **async**                                            |
+| `blobUsage()`                                                 | `Promise<BlobUsage>`                       | `{totalBytes, liveBytes, orphanedBytes, generations}` — when to `relieve()`; O(records), periodic use; **async**                         |
+| `details()`                                                   | `Promise<StoreDetails>`                    | `stats()` + `liveBytes` + blob breakdown — the numbers a server operator sees; O(records); **async**                                     |
 | `close()` / `drop()`                                          | `void`                                     |                                                                                                                                          |
 
 ## Notes / limitations

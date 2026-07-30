@@ -95,6 +95,9 @@ export const fns = {
   removeByPkGreater: def("nteedb_remove_by_pk_greater", ["uint", "str"]),
   compact: def("nteedb_compact", ["uint"]),
   reindex: def("nteedb_reindex", ["uint"]),
+  relieve: def("nteedb_relieve", ["uint"]),
+  blobUsage: def("nteedb_blob_usage", ["uint"]),
+  details: def("nteedb_details", ["uint"]),
   droppedIndexes: def("nteedb_dropped_indexes", ["uint"]),
   prospectiveIndexes: def("nteedb_prospective_indexes", ["uint"]),
 }
