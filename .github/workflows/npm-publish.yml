@@ -8,6 +8,10 @@
 # tagged source on real runners (macOS host build + dockerized Linux builds,
 # mirroring capi/build.sh) and shipped in place of the committed prebuilds.
 # The Go server release on the same tag is handled by release.yml.
+#
+# Auth: npm Trusted Publishing (OIDC) — each package on npmjs.com is
+# configured with this repo + workflow filename as its trusted publisher.
+# No token or secret involved; provenance is attested automatically.
 name: npm-publish
 
 on:
@@ -16,7 +20,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write # npm provenance attestation
+  id-token: write # OIDC: Trusted Publishing auth + provenance attestation
 
 jobs:
   # Decide which packages changed since the previous release tag.
@@ -119,10 +123,11 @@ jobs:
         run: |
           npm run format:check
           npm test
+      # Trusted Publishing (OIDC): no token — npm authenticates the workflow
+      # run itself. Needs npm >= 11.5 (Node 22 bundles 10.x).
+      - run: npm install -g npm@latest
       - name: Publish ntee-db@${{ needs.check.outputs.db_version }}
-        run: npm publish --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish
 
   publish-ntee-db-client:
     needs: check
@@ -147,7 +152,8 @@ jobs:
         run: |
           npm run format:check
           npm test
+      # Trusted Publishing (OIDC): no token — npm authenticates the workflow
+      # run itself. Needs npm >= 11.5 (Node 22 bundles 10.x).
+      - run: npm install -g npm@latest
       - name: Publish ntee-db-client@${{ needs.check.outputs.client_version }}
-        run: npm publish --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish
