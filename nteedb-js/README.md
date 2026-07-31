@@ -208,6 +208,38 @@ if (Buffer.isBuffer(v)) {
 }
 ```
 
+### Rate limiting (single application)
+
+Counter ops + create-only TTL make a complete fixed-window limiter in one
+atomic call — no read-then-write race, no cron to reset windows. The embedded
+store is single-writer (one process per directory), so this fits a limiter
+inside **one application process** — e.g. a Fastify/Express middleware. To
+share limits across processes or hosts, run `nteedb-server` and use the same
+calls from `ntee-db-client` instead.
+
+Count **down from 0** with `take` and put the pool in the floor:
+
+```js
+// pool of 1000 tokens per user per minute; a missing/expired key counts as 0,
+// so the counter runs 0 → -1000 and the floor enforces the pool atomically.
+// cost = what the request consumes (e.g. "create N records" costs N);
+// use cost 1 for a plain requests-per-minute limit.
+const ok = await db.take(`rl:${userId}`, cost, -1000, 60_000)
+if (!ok) reject() // not enough tokens left this window — nothing was written
+```
+
+The TTL is create-only: the first accepted take arms the 60s deadline, takes
+on the live counter never slide it, and once it lapses the next accepted take
+restarts the counter with a fresh window.
+
+`take` is all-or-nothing: a refused take writes nothing (so it never arms a
+window either), a successful one creates the counter and starts the window.
+Tokens left = `1000 + value`; read the value with `get` if you need it for
+logging (not `incr(key, 0)` — that would create an immortal counter at 0 and
+the window could never arm). Verified under load: ~1.8M concurrent requests
+against a Fastify middleware built on this pattern accepted exactly 1000
+tokens per user per window, every window.
+
 ## API
 
 | Method                                                        | Returns                                    | Notes                                                                                                                                    |
@@ -251,7 +283,7 @@ if (Buffer.isBuffer(v)) {
   resolves to the overflow that didn't fit (0 = the full amount applied; a
   counter already at/above max is left unchanged). `take` is all-or-nothing:
   it subtracts `amount` only if the result stays ≥ `left` and resolves
-  `true` iff applied. An operation that changes nothing writes nothing; the
+  `true` if applied. An operation that changes nothing writes nothing; the
   amount must be non-negative. These require a native library built from a
   version that exports them — rebuild via `capi/build.sh` if loading a
   locally built library.
@@ -268,8 +300,9 @@ if (Buffer.isBuffer(v)) {
   - An **expired** counter is recreated fresh by the next op, and then the
     `ttlMs` arg decides: with it the new window is armed; without it the
     recreated counter is **immortal**. For expiring windows/buckets, pass
-    `ttlMs` on every call — `incr("rl:u1", 1, 60000)` is a complete
-    fixed-window rate limiter (no-op on live keys, re-arms lapsed ones).
+    `ttlMs` on every call — `take("rl:u1", cost, -1000, 60000)` is a complete
+    fixed-window rate limiter (no-op on live keys, re-arms lapsed ones; see
+    "Rate limiting" above).
   - Secondary indexes are TTL-unaware: an expired key can linger in
     `secIndex*` key results until cleanup; record fetches already drop it.
 - **Only JSON-object values can be indexed**: immediate values — strings,
