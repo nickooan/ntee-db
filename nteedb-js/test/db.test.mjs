@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { NteeDB } from "../src/index.js"
+import { setMaxInFlight } from "../src/native.js"
 
 async function withDB(opts, fn) {
   const dir = await mkdtemp(path.join(tmpdir(), "nteedb-"))
@@ -785,6 +786,75 @@ test("overlapping async operations settle consistently", async () => {
     assert.deepEqual(await db.get("k0100"), { i: 100 })
     assert.equal((await db.stats()).records, 400)
   })
+})
+
+test("fan-out far past koffi's 256 async-call cap settles cleanly", async () => {
+  await withDB({}, async (db) => {
+    const items = Array.from({ length: 500 }, (_, i) => ({
+      key: "k" + String(i).padStart(4, "0"),
+      value: { i },
+    }))
+    assert.equal(await db.putMany(items), 500)
+    // ~1000 concurrent ops — well past koffi's cap and our 200 gate, so the
+    // internal queue must absorb the overflow.
+    const ops = []
+    for (let i = 0; i < 300; i++)
+      ops.push(db.get("k" + String(i % 500).padStart(4, "0")))
+    for (let i = 0; i < 300; i++)
+      ops.push(db.has("k" + String(i % 500).padStart(4, "0")))
+    for (let i = 0; i < 200; i++) ops.push(db.incr("counter"))
+    for (let i = 0; i < 100; i++) ops.push(db.prefixScan("k00"))
+    for (let i = 0; i < 100; i++)
+      ops.push(db.putMany([{ key: "extra" + i, value: { i } }]))
+    const settled = await Promise.allSettled(ops)
+    const rejected = settled.filter((s) => s.status === "rejected")
+    assert.equal(
+      rejected.length,
+      0,
+      `unexpected rejections: ${rejected.map((r) => r.reason.message).slice(0, 3)}`,
+    )
+    assert.equal(await db.incr("counter", 0), 200)
+  })
+})
+
+test("rejected operations release their queue slot", async () => {
+  await withDB({}, async (db) => {
+    db.put("plain", { a: 1 })
+    db.put("k", "v")
+    // 600 ops > the 200 gate; half reject at the Go layer (incr on a
+    // non-counter value). A leaked slot would starve the tail and hang here.
+    const incrs = []
+    const gets = []
+    for (let i = 0; i < 300; i++) {
+      incrs.push(db.incr("plain"))
+      gets.push(db.get("k"))
+    }
+    const incrResults = await Promise.allSettled(incrs)
+    for (const r of incrResults) {
+      assert.equal(r.status, "rejected")
+      assert.match(r.reason.message, /non-counter/)
+    }
+    for (const v of await Promise.all(gets)) assert.equal(v.toString(), "v")
+  })
+})
+
+test("queue is FIFO: single-slot gate serializes in call order", async () => {
+  try {
+    setMaxInFlight(1)
+    await withDB({}, async (db) => {
+      // With one slot, FIFO makes completion a total order: incr results must
+      // be exactly 1..50 in call order.
+      const results = await Promise.all(
+        Array.from({ length: 50 }, () => db.incr("c")),
+      )
+      assert.deepEqual(
+        results,
+        Array.from({ length: 50 }, (_, i) => i + 1),
+      )
+    })
+  } finally {
+    setMaxInFlight(200)
+  }
 })
 
 test("no memory leak across many calls (RSS stays bounded)", async () => {

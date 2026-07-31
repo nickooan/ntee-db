@@ -336,15 +336,15 @@ tokens per user per window, every window.
   thread stays free and concurrent reads run in parallel — the Go store takes only a
   read lock, which admits many readers at once. Parallelism is capped by the libuv
   pool (`UV_THREADPOOL_SIZE`, default 4); raise it to use more cores.
-- **Max ~256 async calls concurrently in flight**: koffi (the FFI layer) rejects
-  async calls beyond its internal cap with
-  `Error: Too many asynchronous calls are running` — the binding does not queue
-  for you. Excess calls fail fast and cleanly (nothing is written), and calls
-  already in flight are unaffected. This only bites unbounded fan-out like
-  `Promise.all` over thousands of ops at once; request-driven servers rarely
-  reach it (the event loop naturally bounds in-flight calls — a Fastify limiter
-  at ~12k req/s never hit it). When batch-driving the store, bound in-flight
-  concurrency with a worker pool (≤ ~200 is safe), or catch the error and retry.
+- **Unbounded fan-out is safe** — the binding queues for you. koffi (the FFI
+  layer) caps concurrent async calls at 256 per process; the binding gates
+  in-flight FFI calls at 200 (headroom under the cap) and FIFO-queues the rest
+  internally, so `Promise.all` over thousands of ops just works —
+  `Error: Too many asynchronous calls are running` can no longer surface.
+  Queued calls are plain pending promises (natural backpressure — no timers,
+  nothing extra keeping the event loop alive), and a per-op error still rejects
+  only its own promise. The gate costs nothing: actual parallelism is bounded
+  by the libuv pool (`UV_THREADPOOL_SIZE`, default 4) anyway, far below 200.
 
 ## Building the native lib
 
