@@ -16,8 +16,12 @@
 import { NteeDB } from "../src/index.js"
 import { rmSync } from "node:fs"
 
-const GROUPS = 8 // distinct prefixes → 8 independent scans per batch
-const PER_GROUP = 25_000 // keys per prefix; big enough that a scan is real work
+// Env-overridable so the bench doubles as a fan-out stress test, e.g.
+// BENCH_GROUPS=400 BENCH_PER_GROUP=500 node bench/parallel.mjs (past koffi's
+// 256 cap — exercises the binding's internal queue). BENCH_ prefix because
+// GROUPS is a read-only bash builtin that silently swallows assignments.
+const GROUPS = Number(process.env.BENCH_GROUPS) || 8 // distinct prefixes → independent scans per batch
+const PER_GROUP = Number(process.env.BENCH_PER_GROUP) || 25_000 // keys per prefix; big enough that a scan is real work
 const ROUNDS = 6
 const WARMUP = 1
 

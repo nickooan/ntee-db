@@ -132,6 +132,11 @@ cache-less run, and the lock releases on any exit (Ctrl+C, crash, `kill -9`).
 node bench/core.mjs      # main table (ntee-db · lmdb · sqlite)
 node bench/indexed.mjs   # indexed workload table
 node bench/batch.mjs     # putMany, ntee-db only
+node bench/parallel.mjs  # sequential vs Promise.all scans (libuv parallelism)
+
+# parallel.mjs doubles as a fan-out stress test — 400 concurrent scans
+# exercises the binding's internal queue (past koffi's 256-call cap):
+BENCH_GROUPS=400 BENCH_PER_GROUP=500 node bench/parallel.mjs
 ```
 
 ## Usage
@@ -163,7 +168,8 @@ await db.prefixScan("call:") // sorted keys
 await db.secIndexRange("status", 200, 299) // numeric range
 
 // concurrent scans run in parallel on libuv worker threads (RLock admits many
-// readers); raise UV_THREADPOOL_SIZE (default 4) to use more cores.
+// readers); raise UV_THREADPOOL_SIZE (default 4) to use more cores. Fan out as
+// wide as you like — the binding queues internally (see "Concurrency" below).
 const [a, b] = await Promise.all([db.prefixScan("a:"), db.prefixScan("b:")])
 
 // maintenance (off the event loop)
@@ -207,6 +213,41 @@ if (Buffer.isBuffer(v)) {
   // parsed JSON: object / array / scalar (or null if the key is absent)
 }
 ```
+
+### Concurrency
+
+All async methods run off the event loop (koffi async → a libuv worker), and
+the Go store takes only a read lock for reads — so concurrent reads and scans
+run in parallel on real cores. Parallelism is capped by the libuv pool
+(`UV_THREADPOOL_SIZE`, default 4); raise it to use more cores.
+
+**Fan out as wide as you like — the binding handles the concurrency for you.**
+koffi (the FFI layer) allows at most 256 async calls in flight per process;
+the binding gates in-flight FFI calls at 200 and FIFO-queues the rest
+internally, so this just works:
+
+```js
+// 100k concurrent ops: 200 in flight at a time, the rest wait their turn —
+// no "Too many asynchronous calls are running" error, ever.
+const results = await Promise.all(keys.map((k) => db.get(k)))
+```
+
+What that costs and guarantees:
+
+- **Queued ops are plain pending promises** — no timers, no polling, nothing
+  extra keeping the event loop alive. Dispatch order is strictly FIFO.
+- **Memory stays flat**: a waiting op costs ~0.5 KB of heap (measured:
+  200k concurrent `get`s ≈ +106 MB while queued, fully reclaimed on settle),
+  and the queue's own bookkeeping compacts as it drains. The native side is
+  capped at 200 × 256 KiB regardless of how many ops you fire.
+- **Errors stay per-op**: a rejected call releases its slot and rejects only
+  its own promise; the rest of the batch is unaffected.
+- Below 200 in flight there is no queue hop at all — calls dispatch
+  synchronously, identical to a queue-less binding.
+
+For truly huge batch jobs (millions of ops), chunk your `Promise.all` — not
+for the queue's sake, but because a million pending promises is a caller-side
+cost no library can absorb.
 
 ### Rate limiting (single application)
 
@@ -336,15 +377,10 @@ tokens per user per window, every window.
   thread stays free and concurrent reads run in parallel — the Go store takes only a
   read lock, which admits many readers at once. Parallelism is capped by the libuv
   pool (`UV_THREADPOOL_SIZE`, default 4); raise it to use more cores.
-- **Max ~256 async calls concurrently in flight**: koffi (the FFI layer) rejects
-  async calls beyond its internal cap with
-  `Error: Too many asynchronous calls are running` — the binding does not queue
-  for you. Excess calls fail fast and cleanly (nothing is written), and calls
-  already in flight are unaffected. This only bites unbounded fan-out like
-  `Promise.all` over thousands of ops at once; request-driven servers rarely
-  reach it (the event loop naturally bounds in-flight calls — a Fastify limiter
-  at ~12k req/s never hit it). When batch-driving the store, bound in-flight
-  concurrency with a worker pool (≤ ~200 is safe), or catch the error and retry.
+- **Unbounded fan-out is safe** — the binding gates in-flight FFI calls at 200
+  (headroom under koffi's process-wide 256-call cap) and FIFO-queues the rest,
+  so `Error: Too many asynchronous calls are running` can no longer surface.
+  Details and measured costs in ["Concurrency"](#concurrency) above.
 
 ## Building the native lib
 

@@ -122,17 +122,75 @@ export function readEnvelope(s) {
   return env.result
 }
 
-// callAsync runs a koffi function off the event loop (libuv thread) and resolves
-// with its parsed result.
-export function callAsync(fn, ...args) {
-  return new Promise((resolve, reject) => {
-    fn.async(...args, (err, s) => {
-      if (err) return reject(err)
-      try {
-        resolve(readEnvelope(s))
-      } catch (e) {
-        reject(e)
-      }
-    })
+// koffi caps concurrent async calls at 256 per process and throws
+// "Too many asynchronous calls are running" past it. Gate in-flight calls
+// below that (headroom: koffi frees a slot only after the completion callback
+// returns to C++, so completed-but-unfreed slots transiently coexist with
+// newly launched ones) and FIFO-queue the rest, so unbounded Promise.all
+// fan-outs never surface the cap. Module-level on purpose: the cap is
+// process-global, shared by every NteeDB instance.
+let maxInFlight = 200
+let inFlight = 0
+const waiters = [] // FIFO of resolvers awaiting a slot
+let head = 0 // head pointer instead of O(n) shift()
+
+// Test hook, not public API.
+export const setMaxInFlight = (n) => {
+  maxInFlight = n
+}
+
+const acquire = () => {
+  if (inFlight < maxInFlight) {
+    inFlight++
+    return null // fast path: dispatch synchronously, no queue hop
+  }
+  return new Promise((resolve) => waiters.push(resolve))
+}
+
+const release = () => {
+  if (head < waiters.length) {
+    const next = waiters[head]
+    waiters[head++] = undefined
+    if (head === waiters.length) {
+      waiters.length = 0 // drained: free the whole backing store
+      head = 0
+    } else if (head >= 1024 && head * 2 >= waiters.length) {
+      // Never-drained queues (sustained saturation) would otherwise grow the
+      // dead [0, head) prefix forever. Compact once it's big and ≥ half the
+      // array: the copy moves ≤ live-count elements only after head advanced
+      // that many times, so the cost stays amortized O(1) per waiter.
+      waiters.copyWithin(0, head)
+      waiters.length -= head
+      head = 0
+    }
+    next() // hand the slot to the next waiter; inFlight unchanged
+  } else {
+    inFlight--
+  }
+}
+
+const dispatch = (fn, args) =>
+  new Promise((resolve, reject) => {
+    try {
+      fn.async(...args, (err, s) => {
+        release() // first: even a readEnvelope throw must free the slot
+        if (err) return reject(err)
+        try {
+          resolve(readEnvelope(s))
+        } catch (e) {
+          reject(e)
+        }
+      })
+    } catch (e) {
+      release() // fn.async threw synchronously; the call never launched
+      throw e // executor throw → promise rejection
+    }
   })
+
+// callAsync runs a koffi function off the event loop (libuv thread) and resolves
+// with its parsed result. Calls beyond the in-flight gate wait their turn as
+// plain pending promises (no timers, nothing keeping the event loop alive).
+export const callAsync = (fn, ...args) => {
+  const gate = acquire()
+  return gate ? gate.then(() => dispatch(fn, args)) : dispatch(fn, args)
 }
