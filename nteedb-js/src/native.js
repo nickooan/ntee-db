@@ -152,7 +152,15 @@ const release = () => {
     const next = waiters[head]
     waiters[head++] = undefined
     if (head === waiters.length) {
-      waiters.length = 0
+      waiters.length = 0 // drained: free the whole backing store
+      head = 0
+    } else if (head >= 1024 && head * 2 >= waiters.length) {
+      // Never-drained queues (sustained saturation) would otherwise grow the
+      // dead [0, head) prefix forever. Compact once it's big and ≥ half the
+      // array: the copy moves ≤ live-count elements only after head advanced
+      // that many times, so the cost stays amortized O(1) per waiter.
+      waiters.copyWithin(0, head)
+      waiters.length -= head
       head = 0
     }
     next() // hand the slot to the next waiter; inFlight unchanged

@@ -843,13 +843,16 @@ test("queue is FIFO: single-slot gate serializes in call order", async () => {
     setMaxInFlight(1)
     await withDB({}, async (db) => {
       // With one slot, FIFO makes completion a total order: incr results must
-      // be exactly 1..50 in call order.
+      // be exactly 1..N in call order. N=3000 pushes the queue's head pointer
+      // past the 1024 compaction threshold mid-drain, so this also proves
+      // compaction preserves order and drops no waiter.
+      const N = 3000
       const results = await Promise.all(
-        Array.from({ length: 50 }, () => db.incr("c")),
+        Array.from({ length: N }, () => db.incr("c")),
       )
       assert.deepEqual(
         results,
-        Array.from({ length: 50 }, (_, i) => i + 1),
+        Array.from({ length: N }, (_, i) => i + 1),
       )
     })
   } finally {
